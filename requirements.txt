@@ -1,0 +1,38 @@
+# Django
+Django==5.2.7
+
+# REST Framework
+djangorestframework==3.16.1
+
+# ASGI support
+asgiref==3.10.0
+
+# Database parsing
+sqlparse==0.5.3
+
+# Timezone data
+tzdata==2025.2
+
+# Authentication
+djangorestframework-simplejwt
+
+# CORS headers
+django-cors-headers
+
+# Optional: For making HTTP requests from backend
+requests
+celery
+redis
+django-redis
+pillow
+drf-spectacular==0.28.0
+drf-spectacular-sidecar
+python-dotenv
+google-generativeai
+PyPDF2
+PyMuPDF
+python-docx
+django-filter
+google-auth
+stripe
+
