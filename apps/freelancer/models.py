@@ -2,7 +2,8 @@ from django.db import models
 from django.conf import settings
 from django.core.exceptions import ValidationError
 User = settings.AUTH_USER_MODEL
-
+from django.core.exceptions import ValidationError
+from django.utils import timezone
 
 class Category(models.Model):
     name = models.CharField(max_length=100, unique=True)
@@ -67,6 +68,7 @@ class Pricing(models.Model):
         ('fixed', 'Fixed Price'),
         ('range', 'Price Range'),
     ]
+    
 
     freelancer = models.ForeignKey(FreelancerProfile, on_delete=models.CASCADE, related_name="pricing")
     pricing_type = models.CharField(max_length=10, choices=PRICING_TYPE)
@@ -94,6 +96,8 @@ class Pricing(models.Model):
                 raise ValidationError("Min and max price required.")
             if self.min_price >= self.max_price:
                 raise ValidationError("Min price must be < max price.")
+
+
 
 
 

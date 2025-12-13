@@ -466,31 +466,29 @@ def stripe_webhook(request):
 
         user = User.objects.filter(id=user_id).first()
         plan = SubscriptionPlan.objects.filter(id=plan_id).first()
+
         if not user or not plan:
             return HttpResponse(status=400)
 
-        
         with transaction.atomic():
 
-            old_sub = UserSubscription.objects.filter(
-                user=user, is_active=True
-            ).first()
+           
 
-            if old_sub:
-                old_sub.end_date = timezone.now()
-                old_sub.is_active = False
-                old_sub.save()
+            # Calculate end-date
+            end_date = timezone.now() + timezone.timedelta(days=plan.duration_days)
 
-            print("Creating new subscription for user:", user.email)
+            # New subscription
             UserSubscription.objects.create(
                 user=user,
                 plan=plan,
                 start_date=timezone.now(),
-                end_date=timezone.now() + timezone.timedelta(days=plan.duration_days),
-                is_active=True
+                end_date=end_date,
+                remaining_projects=plan.max_projects,
             )
 
     return HttpResponse(status=200)
+
+
 
 class UserSubscriptionViewSet(ListAPIView):
     serializer_class = UserSubscriptionSerializer

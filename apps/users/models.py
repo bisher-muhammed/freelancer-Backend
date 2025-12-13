@@ -159,52 +159,75 @@ class Project(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def clean(self):
-        # Budget validations
+        # ----- FIXED BUDGET VALIDATION -----
         if self.budget_type == "fixed":
-            if not self.fixed_budget:
+            if self.fixed_budget is None:
                 raise ValidationError("Fixed budget amount is required.")
 
+        # ----- HOURLY VALIDATION (FIXED) -----
         if self.budget_type == "hourly":
-            if not (self.hourly_min_rate and self.hourly_max_rate):
+            if self.hourly_min_rate is None or self.hourly_max_rate is None:
                 raise ValidationError("Hourly min and max required.")
+
             if self.hourly_min_rate >= self.hourly_max_rate:
                 raise ValidationError("Hourly min must be < max.")
+
             if self.hourly_min_rate <= 0 or self.hourly_max_rate <= 0:
                 raise ValidationError("Hourly rates must be positive.")
 
-        # Team size validation
+        # ----- TEAM SIZE VALIDATION -----
         if self.assignment_type == "team" and not self.team_size:
             raise ValidationError("Team size is required for team projects.")
 
         if self.assignment_type == "single" and self.team_size:
             raise ValidationError("Single freelancer projects cannot have a team size.")
 
-
     def __str__(self):
         return f"Project: {self.title} by {self.client.username}"
 
 
 
+
+
 class UserSubscription(models.Model):
-    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="subscription")
-    plan = models.ForeignKey(SubscriptionPlan, on_delete=models.SET_NULL, null=True)
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="subscriptions"
+    )
+    plan = models.ForeignKey(
+        SubscriptionPlan,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True
+    )
+
     start_date = models.DateTimeField(default=timezone.now)
-    end_date = models.DateTimeField(blank=True, null=True)
-    is_active = models.BooleanField(default=True)
+    end_date = models.DateTimeField()
+    remaining_projects = models.IntegerField(default=0)
 
     def save(self, *args, **kwargs):
-        # Set end_date only when subscription is first created
-        if not self.end_date and self.plan:
+        # Initialize only when the subscription is created
+        if not self.pk:
+            if not self.plan:
+                raise ValueError("Subscription must have a plan")
+
+            # Set expiry based on plan
             self.end_date = self.start_date + timezone.timedelta(days=self.plan.duration_days)
 
-        # Auto-expire if date passed
-        if self.end_date and self.end_date < timezone.now():
-            self.is_active = False
+            # Set project limit
+            self.remaining_projects = self.plan.max_projects
 
         super().save(*args, **kwargs)
 
+    @property
+    def is_active(self):
+        """Active only if not expired AND user still has projects left."""
+        return self.remaining_projects > 0 and self.end_date > timezone.now()
+
     def __str__(self):
-        return f"{self.user.username} - {self.plan.name} Subscription"
+        return f"{self.user.username} - {self.plan.name} ({self.remaining_projects} left)"
+
 
 
     

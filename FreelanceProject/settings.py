@@ -56,6 +56,7 @@ INSTALLED_APPS = [
     'apps.users',
     'apps.freelancer',
     'apps.adminpanel',
+    'apps.applications'
     
 ]
 

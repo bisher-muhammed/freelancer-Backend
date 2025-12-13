@@ -381,7 +381,6 @@ class ProjectSerializer(serializers.ModelSerializer):
         many=True,
         queryset=Skill.objects.all()
     )
-
     client = UserMiniSerializer(read_only=True)
 
     class Meta:
@@ -405,10 +404,10 @@ class ProjectSerializer(serializers.ModelSerializer):
             "updated_at",
             "client",
         ]
-
         read_only_fields = ["id", "created_at", "updated_at", "status"]
 
-    # -------- Validation -------- #
+    # ------------------- VALIDATIONS ------------------- #
+
     def validate_title(self, value):
         if len(value.strip()) < 5:
             raise serializers.ValidationError("Title must be at least 5 characters long.")
@@ -427,51 +426,64 @@ class ProjectSerializer(serializers.ModelSerializer):
         assignment_type = attrs.get("assignment_type")
         team_size = attrs.get("team_size")
 
-        if budget_type == "fixed" and not fixed_budget:
-            raise serializers.ValidationError("Fixed budget amount is required.")
+        # FIXED
+        if budget_type == "fixed":
+            if fixed_budget is None:
+                raise serializers.ValidationError("Fixed budget amount is required.")
 
+        # HOURLY  (FIXED VALIDATION)
         if budget_type == "hourly":
-            if not (hourly_min and hourly_max):
+            if hourly_min is None or hourly_max is None:
                 raise serializers.ValidationError("Hourly min and max required.")
+
             if hourly_min >= hourly_max:
                 raise serializers.ValidationError("Hourly min must be < max.")
+
             if hourly_min <= 0 or hourly_max <= 0:
                 raise serializers.ValidationError("Hourly rates must be positive.")
 
+        # TEAM / SINGLE
         if assignment_type == "team" and not team_size:
             raise serializers.ValidationError("Team size is required for team projects.")
+
         if assignment_type == "single" and team_size:
             raise serializers.ValidationError("Single freelancer projects cannot have a team size.")
 
         return attrs
 
-    # -------- Create / Update -------- #
+    # ------------------- CREATE ------------------- #
+
+    def _get_available_subscription(self, user):
+        return (
+            user.subscriptions.filter(
+                end_date__gt=timezone.now(),
+                remaining_projects__gt=0
+            )
+            .order_by("end_date")
+            .first()
+        )
+
     def create(self, validated_data):
         skills = validated_data.pop("skills_required", [])
         client = self.context["request"].user
 
-        Subscription = getattr(client,'subscription',None)
+        subscription = self._get_available_subscription(client)
 
-        if not Subscription:
-            raise serializers.ValidationError("No active subscription found")
-        
-        max_allowed =Subscription.plan.max_projects
-        current_count = Project.objects.filter(client=client).count()
-
-        if current_count >= max_allowed:
+        if not subscription:
             raise serializers.ValidationError(
-                f"You have reached your project limit ({max_allowed}). Upgrade your subscription to create more projects."
+                "No available subscription with remaining projects. Buy a new plan to continue."
             )
 
+        # Consume one credit
+        subscription.remaining_projects -= 1
+        subscription.save()
 
-            
-        
-        project = Project.objects.create(
-            client=client,
-            **validated_data
-        )
+        project = Project.objects.create(client=client, **validated_data)
         project.skills_required.set(skills)
+
         return project
+
+    # ------------------- UPDATE ------------------- #
 
     def update(self, instance, validated_data):
         skills = validated_data.pop("skills_required", None)
@@ -488,7 +500,10 @@ class ProjectSerializer(serializers.ModelSerializer):
 
 
 
+
 class UserSubscriptionSerializer(serializers.ModelSerializer):
+    is_active = serializers.SerializerMethodField()
+
     class Meta:
         model = UserSubscription
         fields = [
@@ -497,69 +512,31 @@ class UserSubscriptionSerializer(serializers.ModelSerializer):
             "plan",
             "start_date",
             "end_date",
+            "remaining_projects",
             "is_active",
         ]
-        read_only_fields = ["id", "start_date", "end_date", "is_active"]
+        read_only_fields = ["id", "start_date", "end_date", "remaining_projects", "is_active"]
 
-    def validate(self, attrs):
-        # For creating manually (admin only)
-        if self.instance is None:
-            user = attrs.get("user")
-            if UserSubscription.objects.filter(user=user, is_active=True).exists():
-                raise serializers.ValidationError(
-                    {"user": "This user already has an active subscription."}
-                )
-        return attrs
+    def get_is_active(self, obj):
+        return obj.is_active
 
-    def create(self, validated_data):
-        plan = validated_data["plan"]
-        now = timezone.now()
-
-        return UserSubscription.objects.create(
-            user=validated_data["user"],
-            plan=plan,
-            start_date=now,
-            end_date=now + timezone.timedelta(days=plan.duration_days),
-            is_active=True
-        )
-
-    def update(self, instance, validated_data):
-        # Admin updating plan manually
-        new_plan = validated_data.get("plan", instance.plan)
-
-        if new_plan != instance.plan:
-            now = timezone.now()
-            instance.plan = new_plan
-            instance.start_date = now
-            instance.end_date = now + timezone.timedelta(days=new_plan.duration_days)
-            instance.is_active = True
-
-        instance.save()
-        return instance
 
                         
 
 class CreatePaymentSerializer(serializers.Serializer):
     plan_id = serializers.IntegerField()
 
-    def validate(self,attrs):
-        request = self.context.get("request")
-        user = request.user
+    def validate(self, attrs):
         plan_id = attrs.get("plan_id")
-        try:
-            plan = SubscriptionPlan.objects.filter(id=plan_id).first()
-            if not plan:
-                raise serializers.ValidationError({"plan_id":"Invalid subscription plan."})
-            attrs["plan"] = plan
+        plan = SubscriptionPlan.objects.filter(id=plan_id).first()
 
-            current = UserSubscription.objects.filter(user=user,is_active=True,end_date__gt=timezone.now()).first()
-            if current:
-                raise serializers.ValidationError({"subscription":"You already have an active subscription."})
-            
-        except SubscriptionPlan.DoesNotExist:
-            raise serializers.ValidationError({"plan_id":"Invalid subscription plan."})
+        if not plan:
+            raise serializers.ValidationError({"plan_id": "Invalid subscription plan."})
+
+        attrs["plan"] = plan
         return attrs
-    
+
+
         
 
 
