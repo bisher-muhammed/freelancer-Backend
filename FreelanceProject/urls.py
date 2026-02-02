@@ -23,9 +23,12 @@ urlpatterns = [
 
 
     path('api/', include('apps.users.urls')),
+    path('api/',include('apps.tracking.urls')),
     path('api/',include('apps.freelancer.urls')),
     path('api/', include('apps.adminpanel.urls')),
     path('api/',include('apps.applications.urls')),
+    path('api/',include('apps.contract.urls')),
+    path('api/',include('apps.billing.urls')),
     path('admin/', admin.site.urls),
 
     path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),

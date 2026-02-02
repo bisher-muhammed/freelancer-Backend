@@ -159,53 +159,68 @@ class PricingSerializer(serializers.ModelSerializer):
 # ----------------------------
 class FreelancerProfileSerializer(serializers.ModelSerializer):
     user = serializers.StringRelatedField(read_only=True)
-    email = serializers.EmailField(source='user.email', read_only=True)
-    username = serializers.CharField(source='user.username', read_only=True)
+    user_id = serializers.IntegerField(source="user.id", read_only=True)
+    email = serializers.EmailField(source="user.email", read_only=True)
+    username = serializers.CharField(source="user.username", read_only=True)
 
+    # ============================
+    # Computed profile fields
+    # ============================
     skills_read = serializers.SerializerMethodField()
     education = serializers.SerializerMethodField()
     experience = serializers.SerializerMethodField()
-
     skills_names = serializers.SerializerMethodField()
     categories_names = serializers.SerializerMethodField()
 
-    # Write-only inputs - use custom flexible field
+    # ============================
+    # Write-only inputs
+    # ============================
     skills = FlexibleJSONField(write_only=True, required=False)
     categories = FlexibleJSONField(write_only=True, required=False)
     education_input = FlexibleJSONField(write_only=True, required=False)
     experience_input = FlexibleJSONField(write_only=True, required=False)
 
-    # File fields (optional)
+    # Files
     resume = serializers.FileField(required=False, allow_null=True)
     profile_picture = serializers.ImageField(required=False, allow_null=True)
 
     contact_number = serializers.CharField(
         required=False,
         allow_blank=True,
-        allow_null=True,
-        validators=[RegexValidator(
-            regex=r'^\+?1?\d{9,15}$',
-            message='Invalid phone number format. Use +911234567890'
-        )]
+        allow_null=True
     )
 
     class Meta:
         model = FreelancerProfile
         fields = [
-            'id', 'user', 'username', 'email',
-            'title', 'bio', 'contact_number', 'hourly_rate',
-            'is_verified', 'resume', 'profile_picture',
-            'created_at', 'updated_at',
-            'skills', 'skills_read', 'skills_names',
-            'categories', 'categories_names',
-            'education', 'education_input',
-            'experience', 'experience_input'
-        ]
-        read_only_fields = ['id', 'username', 'email', 'user', 'is_verified', 'created_at', 'updated_at']
+            "id",
+            "user", "user_id", "username", "email",
+            "title", "bio", "contact_number", "hourly_rate",
+            "is_verified",
 
-    # ----------------------------
-    # READ HELPERS
-    # ----------------------------
+            # Files
+            "resume", "profile_picture",
+
+            # Meta
+            "created_at", "updated_at",
+
+            # Skills / categories
+            "skills", "skills_read", "skills_names",
+            "categories", "categories_names",
+
+            # Education / experience
+            "education", "education_input",
+            "experience", "experience_input",
+        ]
+
+        read_only_fields = [
+            "id", "user", "user_id", "username", "email",
+            "is_verified", "created_at", "updated_at",
+        ]
+
+    # ============================
+    # Read helpers
+    # ============================
     def get_skills_read(self, obj):
         return FreelancerSkillSerializer(
             obj.freelancerskill_set.select_related("skill", "skill__category"),
@@ -220,45 +235,43 @@ class FreelancerProfileSerializer(serializers.ModelSerializer):
 
     def get_skills_names(self, obj):
         return list(
-            obj.freelancerskill_set.select_related("skill").values_list("skill__name", flat=True)
+            obj.freelancerskill_set
+            .select_related("skill")
+            .values_list("skill__name", flat=True)
         )
 
     def get_categories_names(self, obj):
         return list(
-            obj.freelancerskill_set.select_related("skill__category")
+            obj.freelancerskill_set
+            .select_related("skill__category")
             .values_list("skill__category__name", flat=True)
             .distinct()
         )
 
-    # ----------------------------
+    # ============================
     # CREATE / UPDATE
-    # ----------------------------
+    # ============================
     @transaction.atomic
     def create(self, validated_data):
         user = self.context["request"].user
 
-        # Extract structured inputs (default to empty lists)
-        skills = validated_data.pop("skills", []) or []
-        categories = validated_data.pop("categories", []) or []
-        education = validated_data.pop("education_input", []) or []
-        experience = validated_data.pop("experience_input", []) or []
+        skills = validated_data.pop("skills", [])
+        categories = validated_data.pop("categories", [])
+        education = validated_data.pop("education_input", [])
+        experience = validated_data.pop("experience_input", [])
 
-        # Handle files if present in validated_data
         profile_picture = validated_data.pop("profile_picture", None)
         resume = validated_data.pop("resume", None)
 
-        # Create profile (remaining validated_data contains simple fields)
         profile = FreelancerProfile.objects.create(user=user, **validated_data)
 
-        # Save files if provided
-        if profile_picture and hasattr(profile_picture, 'read'):
+        if profile_picture:
             profile.profile_picture = profile_picture
-        if resume and hasattr(resume, 'read'):
+        if resume:
             profile.resume = resume
 
         profile.save()
 
-        # Save nested lists
         self._save_skills(profile, skills, categories)
         self._save_education(profile, education)
         self._save_experience(profile, experience)
@@ -267,52 +280,26 @@ class FreelancerProfileSerializer(serializers.ModelSerializer):
 
     @transaction.atomic
     def update(self, instance, validated_data):
-        # Extract input arrays (if present). None means the client explicitly wants removal/empty.
         skills = validated_data.pop("skills", None)
         categories = validated_data.pop("categories", None)
         education = validated_data.pop("education_input", None)
         experience = validated_data.pop("experience_input", None)
 
-        # Handle file fields from validated_data.
-        # FIXED: Check if the value is actually a file, not just if key exists
         profile_picture = validated_data.pop("profile_picture", serializers.empty)
         resume = validated_data.pop("resume", serializers.empty)
 
-        # Update other fields normally
         for key, value in validated_data.items():
             setattr(instance, key, value)
 
-        # Handle file updates
-        # Only update if a new file was provided or explicitly set to None/empty
         if profile_picture is not serializers.empty:
-            if profile_picture is None or profile_picture == '':
-                # Explicitly remove the file
-                if instance.profile_picture:
-                    instance.profile_picture.delete(save=False)
-                instance.profile_picture = None
-            elif hasattr(profile_picture, 'read'):  # It's a file object
-                # Replace with new file
-                if instance.profile_picture:
-                    instance.profile_picture.delete(save=False)
-                instance.profile_picture = profile_picture
+            instance.profile_picture = profile_picture or None
 
         if resume is not serializers.empty:
-            if resume is None or resume == '':
-                # Explicitly remove the file
-                if instance.resume:
-                    instance.resume.delete(save=False)
-                instance.resume = None
-            elif hasattr(resume, 'read'):  # It's a file object
-                # Replace with new file
-                if instance.resume:
-                    instance.resume.delete(save=False)
-                instance.resume = resume
+            instance.resume = resume or None
 
         instance.save()
 
-        # Update nested relations only if client provided them
         if skills is not None:
-            # categories may be None or list; ensure a list for mapping
             self._save_skills(instance, skills or [], categories or [])
         if education is not None:
             self._save_education(instance, education or [])
@@ -325,57 +312,52 @@ class FreelancerProfileSerializer(serializers.ModelSerializer):
     # INTERNAL WRITE HELPERS
     # ----------------------------
     def _save_skills(self, profile, skills, categories):
-        """Save skills - data is already parsed by FlexibleJSONField."""
         if not isinstance(skills, (list, tuple)):
             skills = []
         if not isinstance(categories, (list, tuple)):
             categories = []
 
-        # Remove existing and recreate
         profile.freelancerskill_set.all().delete()
 
         for index, skill_name in enumerate(skills):
             if not skill_name:
                 continue
-            
-            # Convert to string if needed
-            s_name = str(skill_name).strip() if skill_name else None
+
+            s_name = str(skill_name).strip()
             if not s_name:
                 continue
 
-            # Get corresponding category
             if index < len(categories) and categories[index]:
                 category_name = str(categories[index]).strip()
             else:
                 category_name = "General"
-            
+
             category, _ = Category.objects.get_or_create(name=category_name)
             skill_obj, _ = Skill.objects.get_or_create(name=s_name, defaults={"category": category})
-            
+
             FreelancerSkill.objects.create(
                 freelancer=profile,
                 skill=skill_obj,
-                level=3,  # default
+                level=3,
             )
 
     def _save_education(self, profile, education_list):
-        """Save education - data is already parsed by FlexibleJSONField."""
         profile.education_set.all().delete()
-        
+
         if not isinstance(education_list, (list, tuple)):
             return
-        
+
         for edu in education_list:
             if not isinstance(edu, dict):
                 continue
-            
+
             institution = edu.get("institution")
             degree = edu.get("degree")
             year_completed = edu.get("year_completed") or edu.get("year")
-            
+
             if not institution or not degree or not year_completed:
                 continue
-            
+
             try:
                 Education.objects.create(
                     freelancer=profile,
@@ -388,28 +370,26 @@ class FreelancerProfileSerializer(serializers.ModelSerializer):
                 continue
 
     def _save_experience(self, profile, experience_list):
-        """Save experience - data is already parsed by FlexibleJSONField."""
         profile.employmenthistory_set.all().delete()
-        
+
         if not isinstance(experience_list, (list, tuple)):
             return
-        
+
         for exp in experience_list:
             if not isinstance(exp, dict):
                 continue
-            
+
             company = exp.get("company")
             role = exp.get("role")
             start_date = exp.get("start_date")
-            
+
             if not company or not role or not start_date:
                 continue
-            
+
             end_date = exp.get("end_date")
-            # Handle empty string as None
             if end_date == "" or end_date == "null":
                 end_date = None
-            
+
             try:
                 EmploymentHistory.objects.create(
                     freelancer=profile,
@@ -421,4 +401,3 @@ class FreelancerProfileSerializer(serializers.ModelSerializer):
             except Exception as e:
                 logger.warning(f"Failed to create experience entry: {e}")
                 continue
-

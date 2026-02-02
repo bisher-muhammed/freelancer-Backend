@@ -6,7 +6,7 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
@@ -20,6 +20,12 @@ SECRET_KEY = 'django-insecure-#q5_$j7=dl8se+qr9x(a)khua-sjtsz^m&6c@9x7kyo^dzv(_k
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+
+APPID = os.getenv("APPID")
+ZEGO_SERVER_SECRET = os.getenv("ZEGO_SERVER_SECRET")
+ZEGO_SERVER_URL =  os.getenv('ZEGO_SERVER_URL')
+
+
 
 
 # SECURITY WARNING: don't run with debug turned on in production!
@@ -40,7 +46,10 @@ CORS_ALLOW_CREDENTIALS = True
 # Application definition
 
 INSTALLED_APPS = [
+    'daphne',
     "corsheaders",
+    "channels",
+    "django_celery_beat",
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -56,7 +65,11 @@ INSTALLED_APPS = [
     'apps.users',
     'apps.freelancer',
     'apps.adminpanel',
-    'apps.applications'
+    'apps.applications',
+    'apps.contract',
+    'apps.tracking',
+    'apps.billing',
+    'apps.notifications',
     
 ]
 
@@ -75,14 +88,14 @@ ROOT_URLCONF = 'FreelanceProject.urls'
 
 TEMPLATES = [
     {
-        'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
-        'APP_DIRS': True,
-        'OPTIONS': {
-            'context_processors': [
-                'django.template.context_processors.request',
-                'django.contrib.auth.context_processors.auth',
-                'django.contrib.messages.context_processors.messages',
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [BASE_DIR / "templates"],  
+        "APP_DIRS": True,
+        "OPTIONS": {
+            "context_processors": [
+                "django.template.context_processors.request",
+                "django.contrib.auth.context_processors.auth",
+                "django.contrib.messages.context_processors.messages",
             ],
         },
     },
@@ -90,6 +103,8 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'FreelanceProject.wsgi.application'
 
+
+ASGI_APPLICATION = 'FreelanceProject.asgi.application'
 
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
@@ -101,6 +116,10 @@ DATABASES = {
     }
 }
 
+
+CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
+
+SITE_URL = "http://localhost:8000"
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
@@ -123,8 +142,8 @@ AUTH_PASSWORD_VALIDATORS = [
 
 
 REST_FRAMEWORK = {
-    'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+    "DEFAULT_AUTHENTICATION_CLASSES": (
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
 
     "DEFAULT_FILTER_BACKENDS": (
@@ -133,10 +152,21 @@ REST_FRAMEWORK = {
         "rest_framework.filters.OrderingFilter",
     ),
 
-    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
-    'PAGE_SIZE': 20,
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.UserRateThrottle",
+        "rest_framework.throttling.AnonRateThrottle",
+    ],
 
-    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "100/day",
+        "user": "1000/day",
+        "zego_token": "10/min",
+    },
+
+    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    "PAGE_SIZE": 20,
+
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
 }
 
 
@@ -146,6 +176,16 @@ SIMPLE_JWT = {
     'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
     'ROTATE_REFRESH_TOKENS': True,         # Automatically replace refresh token on use
     'BLACKLIST_AFTER_ROTATION': True,      # Enable blacklisting
+}
+
+
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [("127.0.0.1", 6379)],
+        },
+    },
 }
 
 
@@ -244,3 +284,5 @@ EMAIL_PORT = 587
 EMAIL_HOST_USER = 'bisherp297@gmail.com'
 EMAIL_HOST_PASSWORD = 'xtjz gujy joix asvl'
 DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
+
+

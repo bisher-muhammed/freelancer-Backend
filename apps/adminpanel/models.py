@@ -11,3 +11,9 @@ class SubscriptionPlan(models.Model):
         return f"{self.name} - ${self.price}"   
     
 
+class TrackingPolicy(models.Model):
+    version = models.CharField(max_length=20, unique=True)  
+    title = models.CharField(max_length=255)
+    content = models.TextField()  
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)

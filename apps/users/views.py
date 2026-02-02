@@ -2,6 +2,9 @@ from rest_framework import status, generics
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny,IsAuthenticated
 from rest_framework.views import APIView
+
+from apps.applications.services.create_contract import create_contract_for_offer
+from apps.notifications.services import create_notifications
 from .models import ClientProfile,Project, UserSubscription
 from rest_framework.exceptions import NotFound
 from django.contrib.auth import get_user_model
@@ -21,17 +24,9 @@ from rest_framework.generics import ListAPIView
 from .serializers import CreatePaymentSerializer, UserSubscriptionSerializer
 from apps.freelancer.models import FreelancerProfile
 from apps. freelancer.serializers import FreelancerProfileSerializer
-
-
-
-
-
-
-
-
-
-
-
+from apps.applications.models import EscrowPayment, Offer, Proposal, ProposalScore
+from django.db.models import OuterRef, Subquery, FloatField, BooleanField
+from django.db.models.functions import Coalesce
 from .serializers import (
     ProjectSerializer,
     SendOTPSerializer,
@@ -42,6 +37,8 @@ from .serializers import (
     ,VerifyPasswordResetOTPSerializer
     ,ResetPasswordSerializer,
     ClientProfileSerializer,
+    ClientProposalSerializer,
+    ProposalStatusUpdateSerializer
     
 
     
@@ -139,19 +136,18 @@ class LoginView(generics.GenericAPIView):
     serializer_class = LoginSerializer
     permission_classes = [AllowAny]
     
-    def post(self,request,*args,**kwargs):
-        serializer=self.get_serializer(data=request.data)
-        if serializer.is_valid():
-            return Response(
-                {
-                    "success":True,
-                    "message":"Login successful.",
-                    "data":serializer.validated_data
-                },
-                status=status.HTTP_200_OK
-            )
-        
-        return Response(serializer.errors,status=status.HTTP_400_BAD_REQUEST)
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        return Response(
+            {
+                "success": True,
+                "message": "Login successful.",
+                "data": serializer.validated_data
+            },
+            status=status.HTTP_200_OK
+        )
+    
 
 
 #define views for password reset below
@@ -451,42 +447,141 @@ def stripe_webhook(request):
     sig_header = request.META.get("HTTP_STRIPE_SIGNATURE")
     endpoint_secret = settings.STRIPE_WEBHOOK_SECRET
 
+    # -----------------------------------
+    # 1. Verify Stripe Signature
+    # -----------------------------------
     try:
         event = stripe.Webhook.construct_event(
             payload, sig_header, endpoint_secret
         )
-    except (ValueError, stripe.error.SignatureVerificationError):
+    except Exception:
         return HttpResponse(status=400)
 
-    if event["type"] == "checkout.session.completed":
-        session = event["data"]["object"]
+    # -----------------------------------
+    # 2. Only Handle Checkout Success
+    # -----------------------------------
+    if event["type"] != "checkout.session.completed":
+        return HttpResponse(status=200)
 
-        user_id = session["metadata"]["user_id"]
-        plan_id = session["metadata"]["plan_id"]
+    session = event["data"]["object"]
 
-        user = User.objects.filter(id=user_id).first()
-        plan = SubscriptionPlan.objects.filter(id=plan_id).first()
+    metadata = session.get("metadata", {})
+    payment_type = metadata.get("payment_type")
+    payment_intent_id = session.get("payment_intent")
 
-        if not user or not plan:
+    if not payment_type or not payment_intent_id:
+        return HttpResponse(status=400)
+
+    # ==========================================================
+    # ✅ CASE 1: ESCROW PAYMENT (Offer Contract Funding)
+    # ==========================================================
+    if payment_type == "escrow":
+
+        offer_id = metadata.get("offer_id")
+        if not offer_id:
             return HttpResponse(status=400)
 
         with transaction.atomic():
+            try:
+                offer = Offer.objects.select_for_update().get(id=offer_id)
+                payment = offer.payment
+            except Offer.DoesNotExist:
+                return HttpResponse(status=404)
+            except EscrowPayment.DoesNotExist:
+                return HttpResponse(status=404)
 
-           
+            # ✅ Idempotency Guard
+            if payment.status == "escrowed":
+                return HttpResponse(status=200)
 
-            # Calculate end-date
-            end_date = timezone.now() + timezone.timedelta(days=plan.duration_days)
+            if payment.stripe_payment_intent_id == payment_intent_id:
+                return HttpResponse(status=200)
 
-            # New subscription
-            UserSubscription.objects.create(
-                user=user,
-                plan=plan,
-                start_date=timezone.now(),
-                end_date=end_date,
-                remaining_projects=plan.max_projects,
+            if payment.status != "pending":
+                return HttpResponse(status=200)
+
+            # ✅ Mark Escrowed
+            payment.status = "escrowed"
+            payment.escrowed_at = timezone.now()
+            payment.stripe_payment_intent_id = payment_intent_id
+            payment.save()
+
+            freelancer_user = offer.proposal.freelancer
+            client_user = offer.client
+            project = offer.proposal.project
+
+            # ✅ Notify Freelancer: Escrow Funded
+            create_notifications.notify_user(
+                recipient=freelancer_user,
+                notif_type="ESCROW_FUNDED",
+                title="Escrow Funded 💰",
+                message=f"Client funded escrow for '{project.title}'.",
+                data={"offer_id": offer.id}
             )
 
-    return HttpResponse(status=200)
+            # ✅ Create Contract
+            contract = create_contract_for_offer(offer)
+
+            # ✅ Notify Both: Contract Started
+            create_notifications.notify_user(
+                recipient=freelancer_user,
+                notif_type="CONTRACT_STARTED",
+                title="Contract Started ✅",
+                message=f"Contract is now active for '{project.title}'.",
+                data={"contract_id": contract.id}
+            )
+
+            create_notifications.notify_user(
+                recipient=client_user,
+                notif_type="CONTRACT_STARTED",
+                title="Contract Started ✅",
+                message=f"You successfully hired {freelancer_user.username}.",
+                data={"contract_id": contract.id}
+            )
+
+        return HttpResponse(status=200)
+
+    # ==========================================================
+    # ✅ CASE 2: SUBSCRIPTION PAYMENT (Plan Purchase)
+    # ==========================================================
+    elif payment_type == "subscription":
+
+        subscription_id = metadata.get("subscription_id")
+        if not subscription_id:
+            return HttpResponse(status=400)
+
+        with transaction.atomic():
+            try:
+                subscription = UserSubscription.objects.select_for_update().get(
+                    id=subscription_id
+                )
+            except UserSubscription.DoesNotExist:
+                return HttpResponse(status=404)
+
+            # ✅ Idempotency Guard
+            if subscription.status == "active":
+                return HttpResponse(status=200)
+
+            # ✅ Activate Subscription
+            subscription.status = "active"
+            subscription.activated_at = timezone.now()
+            subscription.stripe_payment_intent_id = payment_intent_id
+            subscription.save()
+
+            client_user = subscription.user
+
+            # ✅ Notify Client: Subscription Activated
+            create_notifications.notify_user(
+                recipient=client_user,
+                notif_type="SUBSCRIPTION_ACTIVE",
+                title="Plan Activated 🎉",
+                message="Your subscription payment was successful. You can now post new projects.",
+                data={"subscription_id": subscription.id}
+            )
+
+        return HttpResponse(status=200)
+    return HttpResponse(status=400)
+
 
 
 
@@ -506,7 +601,101 @@ class BrowseFreelancers(ListAPIView):
         return FreelancerProfile.objects.all()
 
     
-    
+
+class ClientProposalListView(generics.ListAPIView):
+    serializer_class = ClientProposalSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+
+        latest_score = ProposalScore.objects.filter(
+            proposal=OuterRef("pk"),
+            is_latest=True
+        )
+
+        return (
+            Proposal.objects
+            .filter(project__client=user)
+            .annotate(
+                final_score=Coalesce(
+                    Subquery(latest_score.values("final_score")[:1]),
+                    0.0,
+                    output_field=FloatField()
+                ),
+                auto_reject=Coalesce(
+                    Subquery(latest_score.values("auto_reject")[:1]),
+                    False,
+                    output_field=BooleanField()
+                ),
+            )
+            # 🔥 PRIORITY ORDERING
+            .order_by(
+                "auto_reject",        # False first
+                "-final_score",       # High → Low
+                "-created_at"         # Newer as tiebreaker
+            )
+            .select_related("freelancer", "project")
+        )
+
+
+class ClientProposalDetailView(generics.RetrieveAPIView):
+    serializer_class = ClientProposalSerializer
+    permission_classes = [IsAuthenticated]
+    lookup_field = "pk"  # default, can use 'id'
+
+    def get_queryset(self):
+        user = self.request.user
+
+        latest_score = ProposalScore.objects.filter(
+            proposal=OuterRef("pk"),
+            is_latest=True
+        )
+
+        return (
+            Proposal.objects
+            .filter(project__client=user)  # Only proposals for this client
+            .annotate(
+                final_score=Coalesce(
+                    Subquery(latest_score.values("final_score")[:1]),
+                    0.0,
+                    output_field=FloatField()
+                ),
+                auto_reject=Coalesce(
+                    Subquery(latest_score.values("auto_reject")[:1]),
+                    False,
+                    output_field=BooleanField()
+                ),
+            )
+            .select_related("freelancer", "project")
+        )
+
+
+class ClientProposalStatusUpdateView(generics.UpdateAPIView):
+    serializer_class = ProposalStatusUpdateSerializer
+    permission_classes = [IsAuthenticated]
+    queryset = Proposal.objects.select_related('project')
+
+    def get_object(self):
+        proposal = super().get_object()  # This is a single object now
+        if proposal.project.client != self.request.user:
+            raise PermissionDenied("Not allowed")
+        return proposal
     
 
+
+class FreelancerProfileDetailView(generics.RetrieveAPIView):
+    serializer_class = FreelancerProfileSerializer
+    permission_classes = [IsAuthenticated]
+    lookup_field = 'user_id'
+
+
+    def get_object(self):
+        user_id = self.kwargs.get('user_id')
+        try:
+            profile = FreelancerProfile.objects.get(user__id=user_id)
+        except FreelancerProfile.DoesNotExist:
+            raise NotFound('freelancerprofile not found')
+        
+        return profile
     

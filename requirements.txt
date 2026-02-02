@@ -35,4 +35,8 @@ python-docx
 django-filter
 google-auth
 stripe
-
+channels
+channels_redis
+daphne
+pycryptodome
+django-celery-beat

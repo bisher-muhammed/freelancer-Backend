@@ -14,6 +14,9 @@ from .models import UserSubscription
 from django.utils import timezone
 from .models import UserSubscription
 from apps.adminpanel.models import SubscriptionPlan
+from apps.applications.models import Proposal,ProposalScore
+from apps.notifications.services import create_notifications
+
 
 
 
@@ -115,13 +118,18 @@ class VerifyOTPSerializer(serializers.Serializer):
 
 
 # ---------- 4️⃣ Login Serializer ----------
+from zoneinfo import ZoneInfo
+from django.utils import timezone as dj_timezone
+
 class LoginSerializer(serializers.Serializer):
     email = serializers.EmailField()
-    password = serializers.CharField(write_only=True, style={'input_type': 'password'})
+    password = serializers.CharField(write_only=True)
+    timezone = serializers.CharField(required=False, allow_blank=True)
 
     def validate(self, data):
-        email = data.get('email').lower().strip()
-        password = data.get('password')
+        email = data.get("email").lower().strip()
+        password = data.get("password")
+        tz_name = data.get("timezone")
 
         user = authenticate(email=email, password=password)
         if not user:
@@ -130,7 +138,19 @@ class LoginSerializer(serializers.Serializer):
         if not user.is_active:
             raise serializers.ValidationError("User account is disabled.")
 
+        # 🔥 Update timezone if provided
+        if tz_name:
+            try:
+                ZoneInfo(tz_name)  # validate
+                user.last_detected_timezone = tz_name
+                if not user.timezone:
+                    user.timezone = tz_name  # only set if empty
+                user.save(update_fields=["timezone", "last_detected_timezone"])
+            except Exception:
+                pass  # ignore invalid timezone
+
         refresh = RefreshToken.for_user(user)
+
         return {
             "refresh": str(refresh),
             "access": str(refresh.access_token),
@@ -139,6 +159,7 @@ class LoginSerializer(serializers.Serializer):
                 "email": user.email,
                 "username": user.username,
                 "role": user.role,
+                "timezone": user.timezone,
             },
         }
 
@@ -224,7 +245,18 @@ class ResetPasswordSerializer(serializers.Serializer):
 class UserMiniSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ["id", "username", "email"]
+        fields = [
+            "id",
+            "username",
+            "email",
+            "timezone",
+            "last_detected_timezone",
+        ]
+        read_only_fields = [
+            "timezone",
+            "last_detected_timezone",
+        ]
+
 
 
 # ---------- 8️⃣ Client Profile Serializer ----------
@@ -373,14 +405,28 @@ class AdminUserSerializer(serializers.ModelSerializer):
         read_only_fields = ["date_joined"]
 
 
+class SkillMiniSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Skill
+        fields = ["id", "name"]
 
         
 
 class ProjectSerializer(serializers.ModelSerializer):
+    # WRITE
     skills_required = serializers.PrimaryKeyRelatedField(
         many=True,
-        queryset=Skill.objects.all()
+        queryset=Skill.objects.all(),
+        write_only=True
     )
+
+    # READ
+    skills = SkillMiniSerializer(
+        source="skills_required",
+        many=True,
+        read_only=True
+    )
+
     client = UserMiniSerializer(read_only=True)
 
     class Meta:
@@ -390,7 +436,8 @@ class ProjectSerializer(serializers.ModelSerializer):
             "title",
             "description",
             "category",
-            "skills_required",
+            "skills_required",  # write
+            "skills",           # read
             "assignment_type",
             "team_size",
             "budget_type",
@@ -480,8 +527,28 @@ class ProjectSerializer(serializers.ModelSerializer):
 
         project = Project.objects.create(client=client, **validated_data)
         project.skills_required.set(skills)
+        create_notifications.notify_user(
+            recipient=client,
+            notif_type="PROJECT_CREATED",
+            title="Project Created",
+            message=f"Your project '{project.title}' has been successfully created.",
+            data={"project_id": project.id}
+        )
+
+        admins = User.objects.filter(role="admin")
+
+        for admin in admins:
+            create_notifications.notify_user(
+                recipient=admin,
+                notif_type="PROJECT_CREATED",
+                title="New Project Posted",
+                message=f"{client.username} created a new project: {project.title}",
+                data={"project_id": project.id}
+            )
+
 
         return project
+    
 
     # ------------------- UPDATE ------------------- #
 
@@ -496,6 +563,12 @@ class ProjectSerializer(serializers.ModelSerializer):
 
         instance.save()
         return instance
+
+
+class ProjectMiniSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Project
+        fields = ['id', 'title', 'budget_type', 'status']
 
 
 
@@ -535,19 +608,127 @@ class CreatePaymentSerializer(serializers.Serializer):
 
         attrs["plan"] = plan
         return attrs
+    
+
+
+
+
+
+class ProposalScoreReadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProposalScore
+        fields = [
+            "skill_match",
+            "experience_match",
+            "budget_fit",
+            "reliability",
+            "final_score",
+            "red_flags",
+            "auto_reject",
+            "auto_reject_reason",
+            "scored_at",
+        ]
+        read_only_fields = fields
+
+
+
+
+
+
 
 
         
+class ClientProposalSerializer(serializers.ModelSerializer):
+    freelancer = UserMiniSerializer(read_only=True)
+    project = ProjectMiniSerializer(read_only=True)
+    score = ProposalScoreReadSerializer(read_only=True)
 
+    class Meta:
+        model = Proposal
+        fields = [
+            'id',
+            'project',
+            'freelancer',
+            'cover_letter',
+            'bid_fixed_price',
+            'bid_hourly_rate',
+            'status',
+            'created_at',
+            'score',
+        ]
 
-
-  
     
 
+class ProposalStatusUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Proposal
+        fields = ['status']
 
-    
-    
-    
-    
-    
+    def validate_status(self, value):
+        proposal = self.instance
+        project = proposal.project
+        request = self.context.get("request")
+
+        user = request.user if request else None
+
+        # -------------------------------
+        # HARD STOPS (system-controlled)
+        # -------------------------------
+        if proposal.status == 'auto_rejected':
+            raise serializers.ValidationError(
+                "Auto-rejected proposals cannot be modified."
+            )
+
+        if value == 'auto_rejected':
+            raise serializers.ValidationError(
+                "Clients cannot auto-reject proposals."
+            )
+
+        # -------------------------------
+        # WITHDRAWN (freelancer only)
+        # -------------------------------
+        if value == 'withdrawn':
+            if not user or user != proposal.freelancer:
+                raise serializers.ValidationError(
+                    "Only the freelancer can withdraw their proposal."
+                )
+            return value
+
+        # -------------------------------
+        # ACCEPTED IS FINAL
+        # -------------------------------
+        if proposal.status == 'accepted':
+            raise serializers.ValidationError(
+                "Accepted proposal status cannot be changed."
+            )
+
+        # -------------------------------
+        # CLIENT-DRIVEN FLOW
+        # -------------------------------
+        allowed_transitions = {
+            'submitted': ['shortlisted', 'rejected'],
+            'shortlisted': ['interviewing', 'rejected'],
+            'interviewing': ['accepted', 'rejected'],
+        }
+
+        if value not in allowed_transitions.get(proposal.status, []):
+            raise serializers.ValidationError(
+                f"Cannot change status from '{proposal.status}' to '{value}'."
+            )
+
+        # -------------------------------
+        # SINGLE ASSIGNMENT SAFETY
+        # -------------------------------
+        if value == 'accepted' and project.assignment_type == 'single':
+            already_accepted = project.proposals.filter(
+                status='accepted'
+            ).exclude(id=proposal.id).exists()
+
+            if already_accepted:
+                raise serializers.ValidationError(
+                    "This project already has an accepted freelancer."
+                )
+
+        return value
+
 

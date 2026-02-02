@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>New Offer on FreelancerHub</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #f8fafc;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      color: #1f2937;
+    }
+    .container {
+      max-width: 600px;
+      margin: 20px auto;
+      background: white;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+      border: 1px solid #e5e7eb;
+    }
+    .header {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      padding: 24px;
+      text-align: center;
+    }
+    .logo {
+      color: white;
+      font-size: 24px;
+      font-weight: bold;
+      margin: 0;
+      letter-spacing: -0.5px;
+    }
+    .content {
+      padding: 32px;
+    }
+    .title {
+      font-size: 20px;
+      font-weight: 600;
+      color: #111827;
+      margin: 0 0 20px 0;
+    }
+    .greeting {
+      font-size: 16px;
+      line-height: 1.6;
+      color: #4b5563;
+      margin-bottom: 24px;
+    }
+    .offer-card {
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 24px;
+      margin: 24px 0;
+    }
+    .offer-row {
+      display: flex;
+      margin-bottom: 12px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid #f3f4f6;
+    }
+    .offer-row:last-child {
+      border-bottom: none;
+      margin-bottom: 0;
+      padding-bottom: 0;
+    }
+    .offer-label {
+      font-weight: 600;
+      color: #6b7280;
+      width: 120px;
+      flex-shrink: 0;
+    }
+    .offer-value {
+      color: #111827;
+      font-weight: 500;
+    }
+    .rate-value {
+      color: #059669;
+      font-weight: 700;
+      font-size: 18px;
+    }
+    .status-badge {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .status-pending {
+      background: #fef3c7;
+      color: #92400e;
+    }
+    .status-expired {
+      background: #f3f4f6;
+      color: #6b7280;
+    }
+    .message-box {
+      background: #eff6ff;
+      border-left: 4px solid #3b82f6;
+      padding: 16px;
+      border-radius: 6px;
+      margin: 24px 0;
+    }
+    .message-label {
+      font-weight: 600;
+      color: #1e40af;
+      margin-bottom: 8px;
+      display: block;
+    }
+    .cta-section {
+      text-align: center;
+      margin: 32px 0;
+      padding-top: 24px;
+      border-top: 2px solid #f3f4f6;
+    }
+    .cta-button {
+      display: inline-block;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 14px 32px;
+      border-radius: 8px;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 16px;
+      transition: transform 0.2s, box-shadow 0.2s;
+      box-shadow: 0 4px 6px -1px rgba(102, 126, 234, 0.2);
+    }
+    .cta-button:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 15px -3px rgba(102, 126, 234, 0.3);
+    }
+    .expiry-notice {
+      background: #fffbeb;
+      border: 1px solid #fde68a;
+      border-radius: 8px;
+      padding: 16px;
+      margin: 20px 0;
+      text-align: center;
+      color: #92400e;
+    }
+    .footer {
+      background: #f9fafb;
+      padding: 24px 32px;
+      border-top: 1px solid #e5e7eb;
+      text-align: center;
+      color: #6b7280;
+      font-size: 14px;
+    }
+    .footer-links {
+      margin-top: 12px;
+    }
+    .footer-links a {
+      color: #667eea;
+      text-decoration: none;
+      margin: 0 8px;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <div class="header">
+      <h1 class="logo">FreelancerHub</h1>
+    </div>
+
+    <div class="content">
+      <h2 class="title">🎯 New Offer Received</h2>
+      
+      <div class="greeting">
+        <p>Hello <strong>{{ freelancer_name }}</strong>,</p>
+        <p>Great news! You've received a new offer from <strong>{{ client_name }}</strong>.</p>
+      </div>
+
+      <div class="offer-card">
+        <div class="offer-row">
+          <span class="offer-label">Project:</span>
+          <span class="offer-value">{{ project_title }}</span>
+        </div>
+        
+        <div class="offer-row">
+          <span class="offer-label">Project Type:</span>
+          <span class="offer-value">{{ project_type|title }}</span>
+        </div>
+        
+        <div class="offer-row">
+          <span class="offer-label">Rate Type:</span>
+          <span class="offer-value">{{ rate_type|title }}</span>
+        </div>
+        
+        <div class="offer-row">
+          <span class="offer-label">Offer Amount:</span>
+          <span class="offer-value rate-value">{{ rate_display }}</span>
+        </div>
+        
+        <div class="offer-row">
+          <span class="offer-label">Offer Status:</span>
+          <span class="offer-value">
+            <span class="status-badge {{ 'status-expired' if is_expired else 'status-pending' }}">
+              {{ 'EXPIRED' if is_expired else status|upper }}
+            </span>
+          </span>
+        </div>
+        
+        <div class="offer-row">
+          <span class="offer-label">Created:</span>
+          <span class="offer-value">{{ created_at_display }}</span>
+        </div>
+        
+        {% if valid_until_display %}
+        <div class="offer-row">
+          <span class="offer-label">Valid Until:</span>
+          <span class="offer-value">{{ valid_until_display }}</span>
+        </div>
+        {% endif %}
+        
+        {% if not can_respond and is_expired %}
+        <div class="offer-row">
+          <span class="offer-label">Response:</span>
+          <span class="offer-value" style="color: #dc2626;">Offer has expired</span>
+        </div>
+        {% endif %}
+      </div>
+
+      {% if message %}
+      <div class="message-box">
+        <span class="message-label">Message from {{ client_name }}:</span>
+        <div style="color: #1e40af; font-style: italic;">"{{ message }}"</div>
+      </div>
+      {% endif %}
+
+      {% if can_respond %}
+      <div class="expiry-notice">
+        ⚠️ Please respond before: <strong>{{ valid_until_display }}</strong>
+      </div>
+      {% endif %}
+
+      <div class="cta-section">
+        <a href="#" class="cta-button">
+          {{ 'View Expired Offer' if is_expired else 'Review & Respond to Offer' }}
+        </a>
+        <p style="margin-top: 16px; color: #6b7280; font-size: 14px;">
+          Log in to your FreelancerHub account to manage this offer.
+        </p>
+      </div>
+    </div>
+
+    <div class="footer">
+      <p>This email was sent to {{ freelancer_email }}.</p>
+      <p>You're receiving this email because you have an active account on FreelancerHub.</p>
+      <div class="footer-links">
+        <a href="#">Visit FreelancerHub</a> • 
+        <a href="#">Help Center</a> • 
+        <a href="#">Contact Support</a>
+      </div>
+      <p style="margin-top: 16px; font-size: 12px; color: #9ca3af;">
+        © {% now "Y" %} FreelancerHub. All rights reserved.
+      </p>
+    </div>
+  </div>
+
+</body>
+</html>

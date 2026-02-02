@@ -1,6 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
+ClientProposalStatusUpdateView,
 CreateCheckoutSession,
 SendOTPView,
 RegisterView,
@@ -16,7 +17,11 @@ ProjectViewSet,
 CreateCheckoutSession,
 stripe_webhook,
 UserSubscriptionViewSet,
-BrowseFreelancers
+BrowseFreelancers,
+ClientProposalListView,
+ClientProposalStatusUpdateView ,
+FreelancerProfileDetailView,
+ClientProposalDetailView
 )
 
 
@@ -53,12 +58,19 @@ path("stripe-webhook/", stripe_webhook, name="stripe-webhook"),
 
 # freelancers
 path("freelancers/", BrowseFreelancers.as_view(),name = "freelancers"),
+path('freelancer-profile/<int:user_id>/',FreelancerProfileDetailView.as_view(),name='freelancer-profile'),
 
+path(
+        "proposals/",
+        ClientProposalListView.as_view(),
+        name="client-proposal-list"
+    ),
 
-
-
-
-
+path ("proposals/<int:pk>/status/",
+        ClientProposalStatusUpdateView.as_view(),
+        name="client-proposal-status-update"
+    ),
+path('proposals/<int:pk>/', ClientProposalDetailView.as_view(), name='client-proposal-detail'),
 # Profile routes  
 path('', include(profile_router.urls)),  
 

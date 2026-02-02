@@ -7,6 +7,7 @@ from apps.adminpanel.models import SubscriptionPlan
 
 
 
+
 class UserManager(BaseUserManager):
     """Custom user manager supporting email authentication."""
 
@@ -52,6 +53,20 @@ class User(AbstractUser):
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default="client")
     created_at = models.DateTimeField(default=timezone.now)
 
+    # ✅ TIMEZONE FIELDS (THIS IS THE FIX)
+    timezone = models.CharField(
+        max_length=64,
+        default="UTC",
+        help_text="User preferred timezone (used for emails & scheduling)"
+    )
+
+    last_detected_timezone = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        help_text="Last timezone detected from browser (UI only)"
+    )
+
     objects = UserManager()
 
     USERNAME_FIELD = "email"
@@ -62,6 +77,7 @@ class User(AbstractUser):
         indexes = [
             models.Index(fields=["email"]),
             models.Index(fields=["role", "is_active"]),
+            models.Index(fields=["timezone"]), 
         ]
 
     def __str__(self):
@@ -70,12 +86,11 @@ class User(AbstractUser):
     def has_admin_access(self):
         return self.role == "admin" and self.is_staff and self.is_superuser
 
+
     
 
 
 class ClientProfile(models.Model):
-    """Profile model for clients"""
-
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="client_profile")
     company_name = models.CharField(max_length=255, blank=True, null=True)
     contact_number = models.CharField(max_length=20, blank=True, null=True)
@@ -89,6 +104,7 @@ class ClientProfile(models.Model):
     profile_picture = models.ImageField(upload_to='client_profiles/', blank=True, null=True)
     country = models.CharField(max_length=100, blank=True, null=True)
     city = models.CharField(max_length=100, blank=True, null=True)
+    stripe_customer_id = models.CharField(max_length=255, blank=True, null=True)
 
     def __str__(self):
         return f"Client Profile: {self.user.username}"
@@ -159,7 +175,6 @@ class Project(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def clean(self):
-        # ----- FIXED BUDGET VALIDATION -----
         if self.budget_type == "fixed":
             if self.fixed_budget is None:
                 raise ValidationError("Fixed budget amount is required.")
@@ -175,7 +190,6 @@ class Project(models.Model):
             if self.hourly_min_rate <= 0 or self.hourly_max_rate <= 0:
                 raise ValidationError("Hourly rates must be positive.")
 
-        # ----- TEAM SIZE VALIDATION -----
         if self.assignment_type == "team" and not self.team_size:
             raise ValidationError("Team size is required for team projects.")
 
@@ -227,19 +241,6 @@ class UserSubscription(models.Model):
 
     def __str__(self):
         return f"{self.user.username} - {self.plan.name} ({self.remaining_projects} left)"
-
-
-
-    
-        
-    
-
-
-        
-
-
-
-    
 
 
 
