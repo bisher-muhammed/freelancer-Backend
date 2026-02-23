@@ -7,6 +7,7 @@ from apps.applications.models import Proposal,ProposalScore,Meeting,Offer
 from apps.freelancer.models import Education,EmploymentHistory ,FreelancerProfile,Skill,FreelancerSkill,Category
 from apps.tracking.models import WorkConsent
 from apps.billing.models import *
+from apps.applications.models import EscrowPayment
 
 
 admin.site.register(ClientProfile)
@@ -32,3 +33,4 @@ admin.site.register(ScreenshotWindow)
 admin.site.register(Screenshot)
 admin.site.register(BillingUnit)
 admin.site.register(PayoutBatch)
+admin.site.register(EscrowPayment)

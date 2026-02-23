@@ -33,7 +33,6 @@ class Notification(models.Model):
 
     message = models.TextField(blank=True)
 
-    # Optional metadata (store IDs like project_id, contract_id)
     data = models.JSONField(default=dict, blank=True)
 
     # Status flags
@@ -43,6 +42,58 @@ class Notification(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["recipient", "is_read"]),
+        ]
+        
 
     def __str__(self):
         return f"Notification({self.recipient.username}, {self.notif_type})"
+
+
+
+
+class ActivityLog(models.Model):
+    """
+    Immutable system-wide activity log.
+    Used for admin dashboards, audits, timelines.
+    """
+
+    ACTIVITY_TYPES = [
+        ("USER_REGISTERED", "User Registered"),
+        ("PROJECT_CREATED", "Project Created"),
+        ("PAYMENT_PROCESSED", "Payment Processed"),
+        ("ESCROW_FUNDED", "Escrow Funded"),
+        ("ESCROW_RELEASED", "Escrow Released"),
+        ("ESCROW_REFUNDED", "Escrow Refunded"),
+        ("CONTRACT_COMPLETED", "Contract Completed"),
+        ("DISPUTE_OPENED", "Dispute Opened"),
+    ]
+
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="activities"
+    )
+
+    activity_type = models.CharField(
+        max_length=50,
+        choices=ACTIVITY_TYPES
+    )
+
+    description = models.TextField()
+
+    metadata = models.JSONField(default=dict, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["activity_type", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.activity_type} @ {self.created_at}"

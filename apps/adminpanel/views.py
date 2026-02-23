@@ -4,8 +4,13 @@ from rest_framework import status, permissions
 from rest_framework.views import APIView
 from rest_framework import viewsets, generics
 from rest_framework.permissions import IsAdminUser
+from django.db.models import Sum
+from datetime import timedelta
+from django.utils.timezone import now
 
 from apps.applications.serializers import MeetingSerializer
+from apps.contract.models import Contract
+from apps.finance.models import LedgerEntry
 from apps.users.models import Project
 from .serializers import AdminMeetingSerializer, AdminMeetingSerializer, AdminProjectDetailSerializer, AdminProjectListSerializer, AdminProjectListSerializer, SubscriptionPlanSerializer, TrackingPolicySerializer
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -242,3 +247,93 @@ class TrackingPolicyListView(generics.ListAPIView):
 
     def get_queryset(self):
         return TrackingPolicy.objects.all().order_by("-created_at")
+
+
+
+
+User = get_user_model()
+
+
+class AdminFinanceStatsView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        now_dt = now()
+        start_this_month = now_dt.replace(day=1)
+        start_last_month = (start_this_month - timedelta(days=1)).replace(day=1)
+
+        def pct(curr, prev):
+            if prev == 0:
+                return None
+            return round(((curr - prev) / prev) * 100, 2)
+
+        total_users = User.objects.count()
+        users_this = User.objects.filter(
+            date_joined__gte=start_this_month
+        ).count()
+        users_last = User.objects.filter(
+            date_joined__gte=start_last_month,
+            date_joined__lt=start_this_month,
+        ).count()
+
+        active_projects = (
+            Contract.objects
+            .filter(status="active")
+            .values("offer__proposal__project")
+            .distinct()
+            .count()
+        )
+
+        revenue_this = (
+            LedgerEntry.objects
+            .filter(
+                entry_type__in=["subscription", "platform_fee"],
+                created_at__gte=start_this_month,
+            )
+            .aggregate(total=Sum("amount"))["total"] or 0
+        )
+
+        revenue_last = (
+            LedgerEntry.objects
+            .filter(
+                entry_type__in=["subscription", "platform_fee"],
+                created_at__gte=start_last_month,
+                created_at__lt=start_this_month,
+            )
+            .aggregate(total=Sum("amount"))["total"] or 0
+        )
+
+        platform_fee_this = (
+            LedgerEntry.objects
+            .filter(
+                entry_type="platform_fee",
+                created_at__gte=start_this_month,
+            )
+            .aggregate(total=Sum("amount"))["total"] or 0
+        )
+
+        platform_fee_last = (
+            LedgerEntry.objects
+            .filter(
+                entry_type="platform_fee",
+                created_at__gte=start_last_month,
+                created_at__lt=start_this_month,
+            )
+            .aggregate(total=Sum("amount"))["total"] or 0
+        )
+
+        return Response({
+            "total_users": {
+                "value": total_users,
+                "change_pct": pct(users_this, users_last),
+            },
+            "active_projects": active_projects,
+            "total_revenue": {
+                "value": revenue_this,
+                "change_pct": pct(revenue_this, revenue_last),
+            },
+            "platform_fee": {
+                "value": platform_fee_this,
+                "change_pct": pct(platform_fee_this, platform_fee_last),
+            },
+        })

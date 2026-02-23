@@ -70,6 +70,7 @@ INSTALLED_APPS = [
     'apps.tracking',
     'apps.billing',
     'apps.notifications',
+    'apps.finance',
     
 ]
 

@@ -1,10 +1,11 @@
 from rest_framework import serializers
 from apps.adminpanel.models import TrackingPolicy
 from apps.applications.models import EscrowPayment, Offer
-from apps.contract.models import Contract, ContractDocument, ContractDocumentFolder
+from apps.contract.models import Contract, ContractDocument, ContractDocumentFolder, TerminationRequest, ContractReview
 from apps.contract.utils.file_validation import validate_contract_document
 from apps.tracking.models import Device, WorkConsent
 from django.db import transaction
+from django.db.models import Avg
 
 
 
@@ -34,27 +35,33 @@ class OfferSummarySerializer(serializers.ModelSerializer):
         # if agreed_hourly_rate > 0 → hourly, otherwise fixed
         return "hourly" if obj.agreed_hourly_rate else "fixed"
 
-
 class EscrowPaymentSerializer(serializers.ModelSerializer):
-    # Frontend expects stripe_session_id → alias for actual field
     stripe_session_id = serializers.SerializerMethodField()
+    remaining_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        read_only=True,
+    )
 
     class Meta:
         model = EscrowPayment
         fields = [
             "id",
             "amount",
+            "released_amount",
+            "refunded_amount",
+            "remaining_amount",
             "status",
             "stripe_session_id",
             "created_at",
-            "escrowed_at",
-            "released_at",
-            "refunded_at",
+            "funded_at",
+            "settled_at",
             "refundable_until",
         ]
 
     def get_stripe_session_id(self, obj):
         return obj.stripe_payment_intent_id
+
 
 
 class ContractSerializer(serializers.ModelSerializer):
@@ -69,7 +76,7 @@ class ContractSerializer(serializers.ModelSerializer):
 
     # Tracking
     tracking_required = serializers.BooleanField(read_only=True)
-    tracking_policy = TrackingPolicyMiniSerializer(read_only=True)
+    tracking_policy = serializers.SerializerMethodField()  # ← changed to method field
 
     # Extra fields
     policy_accepted = serializers.SerializerMethodField()
@@ -103,6 +110,7 @@ class ContractSerializer(serializers.ModelSerializer):
             "ended_at",
             "completed_at",
             "terminated_at",
+            "end_reason",
 
             # Tracking
             "tracking_required",
@@ -118,6 +126,41 @@ class ContractSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
 
+    def get_tracking_policy(self, obj):
+        """
+        Return the policy linked to this contract if already accepted,
+        otherwise fall back to the globally active policy.
+        This ensures the frontend always knows a policy exists even before
+        the freelancer has accepted it (tracking_required is still False).
+        """
+        policy = obj.tracking_policy  # set after acceptance
+
+        if not policy:
+            # Contract not yet accepted — fetch the active policy globally
+            policy = TrackingPolicy.objects.filter(
+                is_active=True
+            ).order_by("-created_at").first()
+
+        if not policy:
+            return None
+
+        return {
+            "id": policy.id,
+            "version": policy.version,
+            "title": policy.title,
+        }
+
+    def get_policy_accepted(self, obj):
+        request = self.context.get("request")
+        user = request.user if request else None
+        if not user:
+            return False
+        return WorkConsent.objects.filter(
+            contract=obj,
+            freelancer=user,
+            is_active=True
+        ).exists()
+
     def get_chat_room_id(self, obj):
         proposal = obj.offer.proposal
         return proposal.chat_room.id if hasattr(proposal, "chat_room") else None
@@ -125,13 +168,6 @@ class ContractSerializer(serializers.ModelSerializer):
     def get_current_user_id(self, obj):
         request = self.context.get("request")
         return request.user.id if request else None
-
-    def get_policy_accepted(self, obj):
-        request = self.context.get("request")
-        user = request.user if request else None
-        if not user:
-            return False
-        return WorkConsent.objects.filter(contract=obj, freelancer=user, is_active=True).exists()
 
     
 
@@ -296,3 +332,140 @@ class ContractDocumentSerializer(serializers.ModelSerializer):
             validated_data['original_name'] = uploaded_file.name
         
         return super().update(instance, validated_data)
+
+
+
+class AdminTerminationRequestSerializer(serializers.ModelSerializer):
+    contract = serializers.SerializerMethodField()
+    requested_by = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TerminationRequest
+        fields = [
+            "id",
+            "status",
+            "reason",
+            "created_at",
+            "requested_by",
+            "contract",
+        ]
+        read_only_fields = fields
+
+    def get_requested_by(self, obj):
+        user = obj.requested_by
+        return {
+            "id": user.id,
+            "email": user.email,
+            "name": user.get_full_name() or user.email,
+        }
+
+    def get_contract(self, obj):
+        contract = obj.contract
+        offer = contract.offer
+
+        return {
+            "id": contract.id,
+            "status": contract.status,
+            "scope_summary": contract.scope_summary,
+            "termination_notice_days": contract.termination_notice_days,
+            "started_at": contract.started_at,
+
+            "offer": {
+                "id": offer.id,
+                "total_budget": offer.total_budget,
+            },
+
+            "client": {
+                "id": offer.client.id,
+                "name": offer.client.get_full_name() or offer.client.email,
+            },
+
+            "freelancer": {
+                "id": offer.freelancer.user.id,
+                "name": offer.freelancer.user.get_full_name() or offer.freelancer.user.email,
+            },
+        }
+    
+
+
+class ContractReviewCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ContractReview
+        fields = (
+            "contract",
+            "freelancer_rating",
+            "freelancer_review",
+            "platform_rating",
+            "platform_feedback",
+        )
+
+    def validate_contract(self, contract):
+        request = self.context["request"]
+
+        # Only the client who owns the contract can review
+        if contract.offer.client != request.user:
+            raise serializers.ValidationError(
+                "You are not allowed to review this contract."
+            )
+
+        # Contract must be completed
+        if contract.status != "ended":
+            raise serializers.ValidationError(
+                "You can review only ended contracts."
+            )
+
+
+        # Prevent duplicate reviews
+        if hasattr(contract, "review"):
+            raise serializers.ValidationError(
+                "This contract has already been reviewed."
+            )
+
+        return contract
+
+    @transaction.atomic
+    def create(self, validated_data):
+        review = super().create(validated_data)
+
+        freelancer_profile = (
+            review.contract.offer.freelancer.freelancer_profile
+        )
+
+        # Recalculate aggregate rating (single source of truth)
+        qs = ContractReview.objects.filter(
+            contract__offer__freelancer=review.contract.offer.freelancer
+        )
+
+        freelancer_profile.total_reviews = qs.count()
+        freelancer_profile.average_rating = (
+            qs.aggregate(avg=Avg("freelancer_rating"))["avg"] or 0
+        )
+
+        freelancer_profile.save(
+            update_fields=["total_reviews", "average_rating"]
+        )
+
+        return review
+
+
+
+class ContractReviewListSerializer(serializers.ModelSerializer):
+    client_email = serializers.CharField(
+        source="client.email", read_only=True
+    )
+    freelancer_email = serializers.CharField(
+        source="freelancer.user.email", read_only=True
+    )
+
+    class Meta:
+        model = ContractReview
+        fields = (
+            "id",
+            "freelancer_rating",
+            "freelancer_review",
+            "client_email",
+            "freelancer_email",
+            "created_at",
+        )
+
+

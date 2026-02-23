@@ -1,3 +1,5 @@
+from decimal import ROUND_HALF_UP, Decimal
+
 from django.db import models
 from django.conf import settings
 from django.utils import timezone
@@ -10,10 +12,15 @@ User = settings.AUTH_USER_MODEL
 class Contract(models.Model):
     STATUS_CHOICES = (
         ("active", "Active"),
-        ("completed", "Completed"),
-        ("terminated", "Terminated"),
+        ("ended", "Ended"),
         ("disputed", "Disputed"),
     )
+
+    END_REASON_CHOICES = (
+        ("completed", "Completed Normally"),
+        ("terminated", "Terminated Early"),
+    )
+
 
     # One contract per accepted offer
     offer = models.OneToOneField(
@@ -40,6 +47,13 @@ class Contract(models.Model):
         default="active"
     )
 
+    end_reason = models.CharField(
+        max_length=20,
+        choices=END_REASON_CHOICES,
+        null=True,
+        blank=True
+    )
+
     tracking_required = models.BooleanField(default=False)
     tracking_policy = models.ForeignKey(
         TrackingPolicy,
@@ -47,6 +61,7 @@ class Contract(models.Model):
         null=True,
         blank=True
     )
+
 
     started_at = models.DateTimeField(default=timezone.now)
     completed_at = models.DateTimeField(null=True, blank=True)
@@ -69,26 +84,26 @@ class Contract(models.Model):
         return self.status == "active"
 
     def mark_completed(self):
-        self.status = "completed"
-        self.completed_at = timezone.now()
-        self.ended_at = self.completed_at
-        self.save(update_fields=["status", "completed_at", "ended_at"])
+        self.status = "ended"
+        self.end_reason = "completed"
+        self.ended_at = timezone.now()
+        self.save(update_fields=["status", "end_reason", "ended_at"])
+
 
     def terminate(self):
-        self.status = "terminated"
-        self.terminated_at = timezone.now()
-        self.ended_at = self.terminated_at
-        self.save(update_fields=["status", "terminated_at", "ended_at"])
+        self.status = "ended"
+        self.end_reason = "terminated"
+        self.ended_at = timezone.now()
+        self.save(update_fields=["status", "end_reason", "ended_at"])
+
     def mark_disputed(self):
         self.status = "disputed"
         self.save(update_fields=["status"]) 
     
-    def calculate_platform_fee(self):
-        """
-        Platform fee is always calculated from total escrow upfront.
-        """
-        amount = self.offer.total_budget
-        return (self.platform_fee_percentage / 100) * amount
+    def calculate_platform_fee(amount, percent):
+        return (amount * percent / Decimal("100")).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
 
     def get_freelancer_user(self):
         return self.offer.freelancer.user
@@ -100,7 +115,7 @@ class Contract(models.Model):
 
 
 
-User = get_user_model()
+
 
 
 class ContractDocumentFolder(models.Model):
@@ -164,3 +179,89 @@ class ContractDocument(models.Model):
         return self.original_name.split(".")[-1].lower()
 
     
+
+
+
+class TerminationRequest(models.Model):
+    STATUS_CHOICES = (
+        ("pending", "Pending"),
+        ("approved", "Approved"),
+        ("rejected", "Rejected"),
+    )
+
+    contract = models.OneToOneField(
+        Contract,
+        on_delete=models.CASCADE,
+        related_name="termination_request"
+    )
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT
+    )
+    reason = models.TextField(blank=True)
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default="pending"
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="reviewed_terminations"
+    )
+
+
+
+class ContractReview(models.Model):
+    RATING_CHOICES = (
+        (1, "Very Bad"),
+        (2, "Bad"),
+        (3, "Average"),
+        (4, "Good"),
+        (5, "Excellent"),
+    )
+
+    contract = models.OneToOneField(
+        Contract,
+        on_delete=models.CASCADE,
+        related_name="review",
+        help_text="Review exists only for ended contracts"
+    )
+
+    
+    freelancer_rating = models.PositiveSmallIntegerField(
+        choices=RATING_CHOICES
+    )
+    freelancer_review = models.TextField(blank=True)
+
+    # Platform experience (optional, future-safe)
+    platform_rating = models.PositiveSmallIntegerField(
+        choices=RATING_CHOICES,
+        null=True,
+        blank=True
+    )
+    platform_feedback = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["freelancer_rating"]),
+            models.Index(fields=["created_at"]),
+        ]
+
+    def __str__(self):
+        return f"Contract #{self.contract_id} – {self.freelancer_rating}/5"
+
+    @property
+    def client(self):
+        return self.contract.offer.client
+
+    @property
+    def freelancer(self):
+        return self.contract.offer.freelancer.freelancer_profile

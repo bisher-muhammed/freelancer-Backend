@@ -1,6 +1,6 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import AdminMeetingViewSet, AdminProjectDetailView, AdminProjectListView, AdminUserList, AdminSubscriptionPlanViewSet, TrackingPolicyCreateView, TrackingPolicyListView,toggle_block ,admin_get_freelancer, admin_verify_freelancer,AdminProjectScoringConfigViewSet
+from .views import AdminFinanceStatsView, AdminMeetingViewSet, AdminProjectDetailView, AdminProjectListView, AdminUserList, AdminSubscriptionPlanViewSet, TrackingPolicyCreateView, TrackingPolicyListView,toggle_block ,admin_get_freelancer, admin_verify_freelancer,AdminProjectScoringConfigViewSet
 
 router = DefaultRouter()
 router.register(
@@ -26,6 +26,7 @@ urlpatterns = [
     path("admin-projects/<int:pk>/", AdminProjectDetailView.as_view()),
     path("admin-tracking-policy/create",TrackingPolicyCreateView.as_view()),
     path("admin-tracking-policy/list",TrackingPolicyListView.as_view()),
+    path("admin-finanas-states/", AdminFinanceStatsView.as_view(), name="admin-financial-states"),
     
 
 

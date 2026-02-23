@@ -22,7 +22,7 @@ urlpatterns = [
         name="admin-billing-unit-list",
     ),
     path(
-        "admin/billing-units/<int:billing_id>/review/",
+        "admin/billing-units/<int:billing_id>/explanation/review/",
         BillingUnitReviewView.as_view(),
         name="admin-billing-unit-review",
     ),

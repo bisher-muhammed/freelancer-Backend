@@ -617,7 +617,7 @@ class Offer(models.Model):
 
     @property
     def has_escrow(self):
-        return hasattr(self, "payment") and self.payment.status == "escrowed"
+        return hasattr(self, "payment") and self.payment.status == "funded"
 
     def __str__(self):
         return f"Offer #{self.id} → Proposal {self.proposal.id} ({self.status})"
@@ -659,9 +659,8 @@ class Offer(models.Model):
 class EscrowPayment(models.Model):
     STATUS_CHOICES = [
         ("pending", "Pending"),
-        ("escrowed", "Escrowed"),
-        ("released", "Released"),
-        ("refunded", "Refunded"),
+        ("funded", "Funded"),
+        ("settled", "Settled"),   
         ("failed", "Failed"),
     ]
 
@@ -671,11 +670,23 @@ class EscrowPayment(models.Model):
         related_name="payment"
     )
 
-    # 🔥 SINGLE SOURCE OF TRUTH FOR STRIPE
     amount = models.DecimalField(
         max_digits=12,
         decimal_places=2,
         help_text="Total escrow amount charged via Stripe"
+    )
+
+    # 🔑 Split tracking
+    released_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0
+    )
+
+    refunded_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0
     )
 
     status = models.CharField(
@@ -692,15 +703,10 @@ class EscrowPayment(models.Model):
     )
 
     created_at = models.DateTimeField(auto_now_add=True)
-    escrowed_at = models.DateTimeField(null=True, blank=True)
-    released_at = models.DateTimeField(null=True, blank=True)
-    refunded_at = models.DateTimeField(null=True, blank=True)
+    funded_at = models.DateTimeField(null=True, blank=True)
+    settled_at = models.DateTimeField(null=True, blank=True)
 
-    refundable_until = models.DateTimeField(
-        null=True,
-        blank=True,
-        help_text="Optional dispute window"
-    )
+    refundable_until = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         indexes = [
@@ -713,8 +719,14 @@ class EscrowPayment(models.Model):
                 "Escrow amount must match offer total budget."
             )
 
-    def __str__(self):
-        return f"EscrowPayment #{self.id} ({self.status})"
+        if self.released_amount + self.refunded_amount > self.amount:
+            raise ValidationError("Escrow over-settlement detected.")
+
+
+    @property
+    def remaining_amount(self):
+        return self.amount - self.released_amount - self.refunded_amount
+    
 
 
 

@@ -57,7 +57,7 @@ class AdminBillingUnitListView(APIView):
 class BillingUnitReviewView(APIView):
     permission_classes = [IsAuthenticated, IsAdminUser]
 
-    def post(self, request, billing_id):
+    def patch(self, request, billing_id):
         billing = get_object_or_404(BillingUnit, id=billing_id)
 
         serializer = BillingUnitReviewSerializer(
@@ -116,6 +116,7 @@ class PayoutConfirmView(APIView):
         # simulate immediate payout
         processor = MockPayoutProcessor()
         processor.process(payout)
+        payout.refresh_from_db() 
         InvoiceService.create_from_payout(payout)
 
         return Response(
@@ -177,7 +178,7 @@ class FreelancerEarningsSummaryView(APIView):
             )
 
         data = InvoiceEarningsSelector.freelancer_summary(
-            request.user.freelancer_profile  # ✅ correct
+            request.user.freelancer_profile  
         )
         return Response(data)
 
@@ -197,13 +198,13 @@ class FreelancerMonthlyEarningsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if not hasattr(request.user, "freelancerprofile"):
+        if not hasattr(request.user, "freelancer_profile"):
             return Response(
                 {"detail": "Only freelancers can access this"},
                 status=403,
             )
 
         data = FreelancerMonthlyEarningsSelector.monthly_breakdown(
-            request.user.freelancerprofile
+            request.user.freelancer_profile
         )
         return Response(data)

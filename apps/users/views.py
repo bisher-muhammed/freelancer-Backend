@@ -1,61 +1,56 @@
-from rest_framework import status, generics
-from rest_framework.response import Response
-from rest_framework.permissions import AllowAny,IsAuthenticated
-from rest_framework.views import APIView
-
-from apps.applications.services.create_contract import create_contract_for_offer
-from apps.notifications.services import create_notifications
-from .models import ClientProfile,Project, UserSubscription
-from rest_framework.exceptions import NotFound
-from django.contrib.auth import get_user_model
-from rest_framework import viewsets
-from django.shortcuts import get_object_or_404
-from rest_framework.exceptions import ValidationError
-from apps.adminpanel.models import SubscriptionPlan
-from rest_framework import permissions
-from apps.adminpanel.serializers import SubscriptionPlanSerializer
-from django.utils import timezone
+import logging
 import stripe
+import traceback
 from django.conf import settings
-from django.views.decorators.csrf import csrf_exempt
-from django.http import HttpResponse
-from django.db import transaction
-from rest_framework.generics import ListAPIView
-from .serializers import CreatePaymentSerializer, UserSubscriptionSerializer
-from apps.freelancer.models import FreelancerProfile
-from apps. freelancer.serializers import FreelancerProfileSerializer
-from apps.applications.models import EscrowPayment, Offer, Proposal, ProposalScore
+from django.contrib.auth import get_user_model
 from django.db.models import OuterRef, Subquery, FloatField, BooleanField
 from django.db.models.functions import Coalesce
+from django.http import HttpResponse
+from django.shortcuts import get_object_or_404
+from django.views.decorators.csrf import csrf_exempt
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
+from rest_framework import status, generics, viewsets, permissions
+from rest_framework.decorators import api_view, permission_classes, action
+from rest_framework.exceptions import NotFound, PermissionDenied
+from rest_framework.generics import ListAPIView
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework_simplejwt.tokens import RefreshToken
+from django.db.models import Count, Sum
+from apps.adminpanel.models import SubscriptionPlan
+from apps.adminpanel.serializers import SubscriptionPlanSerializer
+from apps.applications.models import EscrowPayment, Proposal, ProposalScore
+from apps.contract.models import Contract
+from apps.finance.models import LedgerEntry
+from apps.freelancer.models import FreelancerProfile
+from apps.freelancer.serializers import FreelancerProfileSerializer
+from apps.users.payments.processors import StripeEscrowProcessor, StripeSubscriptionProcessor
+from .models import ClientProfile, Project, UserSubscription
 from .serializers import (
+    CompletedProjectSerializer,
     ProjectSerializer,
     SendOTPSerializer,
     RegisterFormSerializer,
     VerifyOTPSerializer,
     LoginSerializer,
-    ForgotPasswordSerializer
-    ,VerifyPasswordResetOTPSerializer
-    ,ResetPasswordSerializer,
+    ForgotPasswordSerializer,
+    VerifyPasswordResetOTPSerializer,
+    ResetPasswordSerializer,
     ClientProfileSerializer,
     ClientProposalSerializer,
-    ProposalStatusUpdateSerializer
-    
-
-    
+    ProposalStatusUpdateSerializer,
+    CreatePaymentSerializer,
+    UserSubscriptionSerializer,
 )
-
-
 
 User = get_user_model()
 stripe.api_key = settings.STRIPE_SECRET_KEY
- 
+logger = logging.getLogger(__name__)
 
-# -------- 1️⃣ Send / Resend OTP --------
+
 class SendOTPView(generics.GenericAPIView):
-    """
-    Accepts user's email and sends (or resends) an OTP.
-    Used for both initial send and resend during registration.
-    """
     serializer_class = SendOTPSerializer
     permission_classes = [AllowAny]
 
@@ -73,21 +68,13 @@ class SendOTPView(generics.GenericAPIView):
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-
-# -------- 2️⃣ Register Form Submission --------
 class RegisterView(generics.GenericAPIView):
-    """
-    Step 2: Accept registration form (email, username, password, etc.)
-    - Validates but DOES NOT create the user.
-    - Just ensures data is valid and expects OTP verification next.
-    """
     serializer_class = RegisterFormSerializer
     permission_classes = [AllowAny]
 
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         if serializer.is_valid():
-            # No OTP sent here; user already received via SendOTPView
             return Response(
                 {
                     "success": True,
@@ -99,13 +86,7 @@ class RegisterView(generics.GenericAPIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-# -------- 3️⃣ Verify OTP and Create User --------
 class VerifyOTPView(generics.GenericAPIView):
-    """
-    Step 3: Verify OTP and create the user account.
-    - Validates OTP via verify_otp().
-    - Creates and returns the user upon success.
-    """
     serializer_class = VerifyOTPSerializer
     permission_classes = [AllowAny]
 
@@ -127,15 +108,11 @@ class VerifyOTPView(generics.GenericAPIView):
                 status=status.HTTP_201_CREATED,
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
+    
 class LoginView(generics.GenericAPIView):
-    """
-    Login using email and password.
-    Returns access and refresh JWT tokens.
-    """
     serializer_class = LoginSerializer
     permission_classes = [AllowAny]
-    
+
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -147,11 +124,7 @@ class LoginView(generics.GenericAPIView):
             },
             status=status.HTTP_200_OK
         )
-    
 
-
-#define views for password reset below
-# ---------- 1️⃣ Forgot Password ----------
 class ForgotPasswordView(generics.GenericAPIView):
     serializer_class = ForgotPasswordSerializer
     permission_classes = [AllowAny]
@@ -170,7 +143,6 @@ class ForgotPasswordView(generics.GenericAPIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-# ---------- 2️⃣ Verify OTP ----------
 class VerifyPasswordResetOTPView(generics.GenericAPIView):
     serializer_class = VerifyPasswordResetOTPSerializer
     permission_classes = [AllowAny]
@@ -187,8 +159,6 @@ class VerifyPasswordResetOTPView(generics.GenericAPIView):
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-
-# ---------- 3️⃣ Reset Password ----------
 class ResetPasswordView(generics.GenericAPIView):
     serializer_class = ResetPasswordSerializer
     permission_classes = [AllowAny]
@@ -207,17 +177,85 @@ class ResetPasswordView(generics.GenericAPIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-#----- User Profile view CrUD operations can be added below -----#
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def google_login(request):
+    token = request.data.get("id_token")
 
-from rest_framework import viewsets
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.exceptions import ValidationError
-from django.shortcuts import get_object_or_404
-from .models import ClientProfile
-from .serializers import ClientProfileSerializer
+    if not token:
+        return Response({
+            "success": False,
+            "message": "Token is required"
+        }, status=400)
 
-from rest_framework.decorators import action
-from rest_framework.response import Response
+    try:
+        idinfo = id_token.verify_oauth2_token(
+            token,
+            google_requests.Request(),
+            settings.GOOGLE_CLIENT_ID
+        )
+
+        if idinfo['iss'] not in ['accounts.google.com', 'https://accounts.google.com']:
+            return Response({
+                "success": False,
+                "message": "Invalid token issuer"
+            }, status=400)
+
+        email = idinfo.get("email")
+
+        if not email:
+            return Response({
+                "success": False,
+                "message": "Email not found in Google data"
+            }, status=400)
+
+    except ValueError as e:
+        return Response({
+            "success": False,
+            "message": "Invalid Google token",
+            "error": str(e)
+        }, status=400)
+    except Exception as e:
+        traceback.print_exc()
+        return Response({
+            "success": False,
+            "message": "Token verification failed",
+            "error": str(e)
+        }, status=400)
+
+    try:
+        user = User.objects.get(email=email)
+    except User.DoesNotExist:
+        return Response({
+            "success": False,
+            "message": "Email not registered. Please register using password first."
+        }, status=404)
+
+    try:
+        refresh = RefreshToken.for_user(user)
+        access_token = str(refresh.access_token)
+        refresh_token = str(refresh)
+    except Exception:
+        return Response({
+            "success": False,
+            "message": "Failed to generate tokens"
+        }, status=500)
+
+    return Response({
+        "success": True,
+        "message": "Login successful.",
+        "data": {
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "username": user.username,
+                "role": user.role,
+            },
+            "access": access_token,
+            "refresh": refresh_token,
+        }
+    })
+
 
 class ClientProfileViewSet(viewsets.ModelViewSet):
     serializer_class = ClientProfileSerializer
@@ -235,135 +273,6 @@ class ClientProfileViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
 
-
-
-
-
-
-
-
-
-from google.oauth2 import id_token
-from google.auth.transport import requests as google_requests
-from django.contrib.auth import get_user_model
-from rest_framework.response import Response
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny
-from django.conf import settings
-import logging
-
-logger = logging.getLogger(__name__)
-User = get_user_model()
-
-
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def google_login(request):
-   
-    
-    token = request.data.get("id_token")
-    
-    if not token:
-        return Response({
-            "success": False,
-            "message": "Token is required"
-        }, status=400)
-    
-
-    try:
-        
-        
-        # ✅ Verify token with Google
-        idinfo = id_token.verify_oauth2_token(
-            token,
-            google_requests.Request(),
-            settings.GOOGLE_CLIENT_ID
-        )
-        
-        # Validate issuer
-        if idinfo['iss'] not in ['accounts.google.com', 'https://accounts.google.com']:
-            return Response({
-                "success": False,
-                "message": "Invalid token issuer"
-            }, status=400)
-        
-        email = idinfo.get("email")
-        
-        if not email:
-            return Response({
-                "success": False,
-                "message": "Email not found in Google data"
-            }, status=400)
-        
-    except ValueError as e:
-        return Response({
-            "success": False,
-            "message": "Invalid Google token",
-            "error": str(e)
-        }, status=400)
-    except Exception as e:
-        import traceback
-        print("📜 Full traceback:")
-        traceback.print_exc()
-        return Response({
-            "success": False,
-            "message": "Token verification failed",
-            "error": str(e)
-        }, status=400)
-
-    # Check if user exists
-    
-    try:
-        user = User.objects.get(email=email)
-    except User.DoesNotExist:
-        return Response({
-            "success": False,
-            "message": "Email not registered. Please register using password first."
-        }, status=404)
-
-    # Generate JWT tokens
-    try:
-        from rest_framework_simplejwt.tokens import RefreshToken
-        refresh = RefreshToken.for_user(user)
-        
-        access_token = str(refresh.access_token)
-        refresh_token = str(refresh)
-        
-        print(f"✅ Access token generated (length: {len(access_token)})")
-        print(f"✅ Refresh token generated (length: {len(refresh_token)})")
-        
-    except Exception as e:
-        return Response({
-            "success": False,
-            "message": "Failed to generate tokens"
-        }, status=500)
-
-    
-    return Response({
-        "success": True,
-        "message": "Login successful.",
-        "data": {
-            "user": {
-                "id": user.id,
-                "email": user.email,
-                "username": user.username,
-                "role": user.role,
-            },
-            "access": access_token,
-            "refresh": refresh_token,
-        }
-    })
-
-
-
-from rest_framework import viewsets, status
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
-from django.shortcuts import get_object_or_404
-
-from .models import Project
-from .serializers import ProjectSerializer
-
 class ProjectViewSet(viewsets.ModelViewSet):
     serializer_class = ProjectSerializer
     permission_classes = [IsAuthenticated]
@@ -379,7 +288,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
     def update(self, request, pk=None, *args, **kwargs):
         project = get_object_or_404(self.get_queryset(), pk=pk)
         partial = kwargs.pop('partial', False)
-        
+
         serializer = self.get_serializer(project, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
         serializer.save()
@@ -396,9 +305,6 @@ class ProjectViewSet(viewsets.ModelViewSet):
         return Response({"detail": "Project deleted successfully."}, status=status.HTTP_204_NO_CONTENT)
 
 
-
-
-
 class SubscriptionPlanListView(generics.ListAPIView):
     queryset = SubscriptionPlan.objects.all()
     serializer_class = SubscriptionPlanSerializer
@@ -409,25 +315,29 @@ class CreateCheckoutSession(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        serializer = CreatePaymentSerializer(data=request.data, context={"request": request})
+        serializer = CreatePaymentSerializer(
+            data=request.data,
+            context={"request": request},
+        )
         serializer.is_valid(raise_exception=True)
 
         plan = serializer.validated_data["plan"]
 
-        amount = int(plan.price * 100)
-
         checkout_session = stripe.checkout.Session.create(
-            payment_method_types=['card'],
-            mode='payment',
+            mode="payment",
+            payment_method_types=["card"],
             line_items=[{
                 "price_data": {
                     "currency": "inr",
-                    "product_data": {"name": plan.name},
-                    "unit_amount": amount,
+                    "product_data": {
+                        "name": plan.name,
+                    },
+                    "unit_amount": int(plan.price * 100),
                 },
                 "quantity": 1,
             }],
             metadata={
+                "payment_type": "subscription",
                 "user_id": request.user.id,
                 "plan_id": plan.id,
             },
@@ -437,153 +347,61 @@ class CreateCheckoutSession(APIView):
 
         return Response({"checkout_url": checkout_session.url})
 
-
-
-
-
 @csrf_exempt
 def stripe_webhook(request):
     payload = request.body
     sig_header = request.META.get("HTTP_STRIPE_SIGNATURE")
-    endpoint_secret = settings.STRIPE_WEBHOOK_SECRET
 
-    # -----------------------------------
-    # 1. Verify Stripe Signature
-    # -----------------------------------
     try:
         event = stripe.Webhook.construct_event(
-            payload, sig_header, endpoint_secret
+            payload,
+            sig_header,
+            settings.STRIPE_WEBHOOK_SECRET,
         )
     except Exception:
         return HttpResponse(status=400)
 
-    # -----------------------------------
-    # 2. Only Handle Checkout Success
-    # -----------------------------------
     if event["type"] != "checkout.session.completed":
         return HttpResponse(status=200)
 
     session = event["data"]["object"]
+    metadata = session.get("metadata") or {}
 
-    metadata = session.get("metadata", {})
     payment_type = metadata.get("payment_type")
-    payment_intent_id = session.get("payment_intent")
 
-    if not payment_type or not payment_intent_id:
-        return HttpResponse(status=400)
-
-    # ==========================================================
-    # ✅ CASE 1: ESCROW PAYMENT (Offer Contract Funding)
-    # ==========================================================
+    # --------------------------------------------------
+    # ESCROW PAYMENT
+    # --------------------------------------------------
     if payment_type == "escrow":
-
         offer_id = metadata.get("offer_id")
-        if not offer_id:
+        payment_intent_id = session.get("payment_intent")
+
+        if not offer_id or not payment_intent_id:
             return HttpResponse(status=400)
 
-        with transaction.atomic():
-            try:
-                offer = Offer.objects.select_for_update().get(id=offer_id)
-                payment = offer.payment
-            except Offer.DoesNotExist:
-                return HttpResponse(status=404)
-            except EscrowPayment.DoesNotExist:
-                return HttpResponse(status=404)
-
-            # ✅ Idempotency Guard
-            if payment.status == "escrowed":
-                return HttpResponse(status=200)
-
-            if payment.stripe_payment_intent_id == payment_intent_id:
-                return HttpResponse(status=200)
-
-            if payment.status != "pending":
-                return HttpResponse(status=200)
-
-            # ✅ Mark Escrowed
-            payment.status = "escrowed"
-            payment.escrowed_at = timezone.now()
-            payment.stripe_payment_intent_id = payment_intent_id
-            payment.save()
-
-            freelancer_user = offer.proposal.freelancer
-            client_user = offer.client
-            project = offer.proposal.project
-
-            # ✅ Notify Freelancer: Escrow Funded
-            create_notifications.notify_user(
-                recipient=freelancer_user,
-                notif_type="ESCROW_FUNDED",
-                title="Escrow Funded 💰",
-                message=f"Client funded escrow for '{project.title}'.",
-                data={"offer_id": offer.id}
-            )
-
-            # ✅ Create Contract
-            contract = create_contract_for_offer(offer)
-
-            # ✅ Notify Both: Contract Started
-            create_notifications.notify_user(
-                recipient=freelancer_user,
-                notif_type="CONTRACT_STARTED",
-                title="Contract Started ✅",
-                message=f"Contract is now active for '{project.title}'.",
-                data={"contract_id": contract.id}
-            )
-
-            create_notifications.notify_user(
-                recipient=client_user,
-                notif_type="CONTRACT_STARTED",
-                title="Contract Started ✅",
-                message=f"You successfully hired {freelancer_user.username}.",
-                data={"contract_id": contract.id}
-            )
-
+        StripeEscrowProcessor().process(
+            offer_id=offer_id,
+            payment_intent_id=payment_intent_id,
+        )
         return HttpResponse(status=200)
 
-    # ==========================================================
-    # ✅ CASE 2: SUBSCRIPTION PAYMENT (Plan Purchase)
-    # ==========================================================
-    elif payment_type == "subscription":
+    # --------------------------------------------------
+    # SUBSCRIPTION PAYMENT
+    # --------------------------------------------------
+    if payment_type == "subscription":
+        user_id = metadata.get("user_id")
+        plan_id = metadata.get("plan_id")
 
-        subscription_id = metadata.get("subscription_id")
-        if not subscription_id:
+        if not user_id or not plan_id:
             return HttpResponse(status=400)
 
-        with transaction.atomic():
-            try:
-                subscription = UserSubscription.objects.select_for_update().get(
-                    id=subscription_id
-                )
-            except UserSubscription.DoesNotExist:
-                return HttpResponse(status=404)
-
-            # ✅ Idempotency Guard
-            if subscription.status == "active":
-                return HttpResponse(status=200)
-
-            # ✅ Activate Subscription
-            subscription.status = "active"
-            subscription.activated_at = timezone.now()
-            subscription.stripe_payment_intent_id = payment_intent_id
-            subscription.save()
-
-            client_user = subscription.user
-
-            # ✅ Notify Client: Subscription Activated
-            create_notifications.notify_user(
-                recipient=client_user,
-                notif_type="SUBSCRIPTION_ACTIVE",
-                title="Plan Activated 🎉",
-                message="Your subscription payment was successful. You can now post new projects.",
-                data={"subscription_id": subscription.id}
-            )
-
+        StripeSubscriptionProcessor().process(
+            user_id=user_id,
+            plan_id=plan_id,
+        )
         return HttpResponse(status=200)
+
     return HttpResponse(status=400)
-
-
-
 
 class UserSubscriptionViewSet(ListAPIView):
     serializer_class = UserSubscriptionSerializer
@@ -592,7 +410,7 @@ class UserSubscriptionViewSet(ListAPIView):
     def get_queryset(self):
         return UserSubscription.objects.filter(user=self.request.user)
 
-    
+
 class BrowseFreelancers(ListAPIView):
     serializer_class = FreelancerProfileSerializer
     permission_classes = [IsAuthenticated]
@@ -600,7 +418,6 @@ class BrowseFreelancers(ListAPIView):
     def get_queryset(self):
         return FreelancerProfile.objects.all()
 
-    
 
 class ClientProposalListView(generics.ListAPIView):
     serializer_class = ClientProposalSerializer
@@ -629,20 +446,18 @@ class ClientProposalListView(generics.ListAPIView):
                     output_field=BooleanField()
                 ),
             )
-            # 🔥 PRIORITY ORDERING
             .order_by(
-                "auto_reject",        # False first
-                "-final_score",       # High → Low
-                "-created_at"         # Newer as tiebreaker
+                "auto_reject",
+                "-final_score",
+                "-created_at"
             )
             .select_related("freelancer", "project")
         )
 
-
 class ClientProposalDetailView(generics.RetrieveAPIView):
     serializer_class = ClientProposalSerializer
     permission_classes = [IsAuthenticated]
-    lookup_field = "pk"  # default, can use 'id'
+    lookup_field = "pk"
 
     def get_queryset(self):
         user = self.request.user
@@ -654,7 +469,7 @@ class ClientProposalDetailView(generics.RetrieveAPIView):
 
         return (
             Proposal.objects
-            .filter(project__client=user)  # Only proposals for this client
+            .filter(project__client=user)
             .annotate(
                 final_score=Coalesce(
                     Subquery(latest_score.values("final_score")[:1]),
@@ -670,32 +485,94 @@ class ClientProposalDetailView(generics.RetrieveAPIView):
             .select_related("freelancer", "project")
         )
 
-
 class ClientProposalStatusUpdateView(generics.UpdateAPIView):
     serializer_class = ProposalStatusUpdateSerializer
     permission_classes = [IsAuthenticated]
     queryset = Proposal.objects.select_related('project')
 
     def get_object(self):
-        proposal = super().get_object()  # This is a single object now
+        proposal = super().get_object()
         if proposal.project.client != self.request.user:
             raise PermissionDenied("Not allowed")
         return proposal
-    
-
 
 class FreelancerProfileDetailView(generics.RetrieveAPIView):
     serializer_class = FreelancerProfileSerializer
     permission_classes = [IsAuthenticated]
     lookup_field = 'user_id'
 
-
     def get_object(self):
         user_id = self.kwargs.get('user_id')
         try:
             profile = FreelancerProfile.objects.get(user__id=user_id)
         except FreelancerProfile.DoesNotExist:
-            raise NotFound('freelancerprofile not found')
-        
+            raise NotFound('Freelancer profile not found')
+
         return profile
-    
+
+class ClientStatisticsView(APIView):
+    def get(self, request):
+        user = request.user
+
+        projects = Project.objects.filter(client=user)
+
+        contracts = Contract.objects.filter(
+            offer__proposal__project__client=user
+        )
+
+        total_spent = EscrowPayment.objects.filter(
+            offer__proposal__project__client=user,
+            status__in=["funded", "settled"]
+        ).aggregate(
+            total=Sum("amount")
+        )["total"] or 0
+
+        data = {
+            "active_projects": projects.filter(
+                status__in=["open", "in_progress"]
+            ).count(),
+
+            "completed_projects": projects.filter(
+                status="completed"
+            ).count(),
+
+            "total_freelancers_hired": contracts.values(
+                "offer__freelancer"
+            ).distinct().count(),
+
+            "total_spent": total_spent,
+        }
+
+        return Response(data)
+
+
+class ClientRecentProjectsView(generics.ListAPIView):
+    serializer_class = ProjectSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return Project.objects.filter(client=self.request.user).order_by("-created_at")[:5]
+
+
+class CompletedProjectsView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = CompletedProjectSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+
+        return (
+            Project.objects
+            .filter(
+                client=user,
+                proposals__offer__contract__status="ended",
+                proposals__offer__contract__end_reason="completed",
+            )
+            .distinct()
+            .select_related("client")
+            .prefetch_related(
+                "proposals__offer__freelancer__user",
+                "proposals__offer__contract",
+            )
+            .order_by("-updated_at")
+        )

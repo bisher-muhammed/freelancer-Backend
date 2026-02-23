@@ -1,36 +1,43 @@
-from rest_framework import serializers
-from django.contrib.auth import get_user_model, authenticate
-from .utils import create_and_send_otp, verify_otp
 import re
-from rest_framework_simplejwt.tokens import RefreshToken
+from zoneinfo import ZoneInfo
+from django.contrib.auth import get_user_model, authenticate
 from django.core.validators import RegexValidator, MinValueValidator, MaxValueValidator
-from .models import ClientProfile
-from apps.freelancer.models import FreelancerProfile
 from django.db import transaction
-from apps.freelancer.serializers import FreelancerProfileSerializer
-from .models import Project
-from apps.freelancer.models import Skill
-from .models import UserSubscription
 from django.utils import timezone
-from .models import UserSubscription
+from rest_framework import serializers
+from rest_framework_simplejwt.tokens import RefreshToken
+
+from apps.contract.models import Contract
+from apps.notifications.models import ActivityLog
+
+from .utils import create_and_send_otp, verify_otp
+from .models import ClientProfile, Project, UserSubscription
+from apps.freelancer.models import Skill
+from apps.freelancer.serializers import FreelancerProfileSerializer
 from apps.adminpanel.models import SubscriptionPlan
-from apps.applications.models import Proposal,ProposalScore
+from apps.applications.models import Proposal, ProposalScore
 from apps.notifications.services import create_notifications
-
-
-
-
-
+from apps.notifications.services.activity import log_activity
 
 User = get_user_model()
 
 
-# -------- 1️⃣ Send / Resend OTP Serializer --------
+def validate_strong_password(value):
+    if not re.search(r"[A-Z]", value):
+        raise serializers.ValidationError("Password must contain at least one uppercase letter.")
+    if not re.search(r"[a-z]", value):
+        raise serializers.ValidationError("Password must contain at least one lowercase letter.")
+    if not re.search(r"\d", value):
+        raise serializers.ValidationError("Password must contain at least one digit.")
+    if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", value):
+        raise serializers.ValidationError("Password must contain at least one special character.")
+    return value
+
+
 class SendOTPSerializer(serializers.Serializer):
     email = serializers.EmailField()
 
     def validate_email(self, value):
-        """Ensure email is valid and not already registered"""
         value = value.lower().strip()
         if not re.match(r"[^@]+@[^@]+\.[^@]+", value):
             raise serializers.ValidationError("Enter a valid email address.")
@@ -39,13 +46,11 @@ class SendOTPSerializer(serializers.Serializer):
         return value
 
     def create(self, validated_data):
-        """Send or resend OTP"""
         email = validated_data["email"]
         create_and_send_otp(email, purpose="register")
         return {"email": email, "otp_sent": True}
 
 
-# -------- 2️⃣ Register Form Serializer (with strong password validation) --------
 class RegisterFormSerializer(serializers.Serializer):
     email = serializers.EmailField()
     username = serializers.CharField(max_length=150)
@@ -54,7 +59,8 @@ class RegisterFormSerializer(serializers.Serializer):
         write_only=True,
         min_length=8,
         style={'input_type': 'password'},
-        help_text="Password must contain uppercase, lowercase, number, and special character."
+        help_text="Password must contain uppercase, lowercase, number, and special character.",
+        validators=[validate_strong_password]
     )
     confirm_password = serializers.CharField(write_only=True, min_length=8)
 
@@ -66,25 +72,12 @@ class RegisterFormSerializer(serializers.Serializer):
             raise serializers.ValidationError("Email already registered.")
         return value
 
-    def validate_password(self, value):
-        """Password strength validation"""
-        if not re.search(r"[A-Z]", value):
-            raise serializers.ValidationError("Password must contain at least one uppercase letter.")
-        if not re.search(r"[a-z]", value):
-            raise serializers.ValidationError("Password must contain at least one lowercase letter.")
-        if not re.search(r"\d", value):
-            raise serializers.ValidationError("Password must contain at least one digit.")
-        if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", value):
-            raise serializers.ValidationError("Password must contain at least one special character.")
-        return value
-
     def validate(self, data):
         if data["password"] != data["confirm_password"]:
             raise serializers.ValidationError({"confirm_password": "Passwords do not match."})
         return data
 
 
-# -------- 3️⃣ Verify OTP Serializer --------
 class VerifyOTPSerializer(serializers.Serializer):
     email = serializers.EmailField()
     username = serializers.CharField()
@@ -99,7 +92,6 @@ class VerifyOTPSerializer(serializers.Serializer):
         if not verify_otp(email, otp, purpose="register"):
             raise serializers.ValidationError({"otp": "Invalid or expired OTP."})
 
-        # Ensure email isn't already used
         if User.objects.filter(email=email).exists():
             raise serializers.ValidationError({"email": "Email already registered."})
 
@@ -113,13 +105,15 @@ class VerifyOTPSerializer(serializers.Serializer):
         user = User(**validated_data)
         user.set_password(password)
         user.save()
+
+        log_activity(
+            actor=user,
+            activity_type="USER_REGISTERED",
+            description="User registered via OTP verification",
+            metadata={"role": user.role, "email": user.email},
+        )
         return user
 
-
-
-# ---------- 4️⃣ Login Serializer ----------
-from zoneinfo import ZoneInfo
-from django.utils import timezone as dj_timezone
 
 class LoginSerializer(serializers.Serializer):
     email = serializers.EmailField()
@@ -138,16 +132,15 @@ class LoginSerializer(serializers.Serializer):
         if not user.is_active:
             raise serializers.ValidationError("User account is disabled.")
 
-        # 🔥 Update timezone if provided
         if tz_name:
             try:
-                ZoneInfo(tz_name)  # validate
+                ZoneInfo(tz_name)
                 user.last_detected_timezone = tz_name
                 if not user.timezone:
-                    user.timezone = tz_name  # only set if empty
+                    user.timezone = tz_name
                 user.save(update_fields=["timezone", "last_detected_timezone"])
             except Exception:
-                pass  # ignore invalid timezone
+                pass
 
         refresh = RefreshToken.for_user(user)
 
@@ -164,7 +157,6 @@ class LoginSerializer(serializers.Serializer):
         }
 
 
-# ---------- 5️⃣ Forgot Password ----------
 class ForgotPasswordSerializer(serializers.Serializer):
     email = serializers.EmailField()
 
@@ -180,7 +172,6 @@ class ForgotPasswordSerializer(serializers.Serializer):
         return {"email": email, "otp_sent": True}
 
 
-# ---------- 6️⃣ Verify Password Reset OTP ----------
 class VerifyPasswordResetOTPSerializer(serializers.Serializer):
     email = serializers.EmailField()
     otp = serializers.CharField(write_only=True)
@@ -194,14 +185,14 @@ class VerifyPasswordResetOTPSerializer(serializers.Serializer):
         return data
 
 
-# ---------- 7️⃣ Reset Password ----------
 class ResetPasswordSerializer(serializers.Serializer):
     email = serializers.EmailField()
     new_password = serializers.CharField(
         write_only=True,
         min_length=8,
         style={'input_type': 'password'},
-        help_text="Password must contain uppercase, lowercase, number, and special character."
+        help_text="Password must contain uppercase, lowercase, number, and special character.",
+        validators=[validate_strong_password]
     )
     confirm_new_password = serializers.CharField(write_only=True, min_length=8)
 
@@ -209,18 +200,6 @@ class ResetPasswordSerializer(serializers.Serializer):
         value = value.lower().strip()
         if not User.objects.filter(email=value).exists():
             raise serializers.ValidationError("Email not found.")
-        return value
-
-    def validate_new_password(self, value):
-        """Password strength validation"""
-        if not re.search(r"[A-Z]", value):
-            raise serializers.ValidationError("Password must contain at least one uppercase letter.")
-        if not re.search(r"[a-z]", value):
-            raise serializers.ValidationError("Password must contain at least one lowercase letter.")
-        if not re.search(r"\d", value):
-            raise serializers.ValidationError("Password must contain at least one digit.")
-        if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", value):
-            raise serializers.ValidationError("Password must contain at least one special character.")
         return value
 
     def validate(self, data):
@@ -258,15 +237,11 @@ class UserMiniSerializer(serializers.ModelSerializer):
         ]
 
 
-
-# ---------- 8️⃣ Client Profile Serializer ----------
 class ClientProfileSerializer(serializers.ModelSerializer):
-    # Read-only user fields
     email = serializers.EmailField(source='user.email', read_only=True)
     username = serializers.CharField(source='user.username', read_only=True)
     profile_picture = serializers.ImageField(required=False, allow_null=True)
 
-    # Contact number validation
     contact_number = serializers.CharField(
         required=False,
         allow_blank=True,
@@ -279,7 +254,6 @@ class ClientProfileSerializer(serializers.ModelSerializer):
         ]
     )
 
-    # Rating validation
     rating = serializers.DecimalField(
         max_digits=3,
         decimal_places=2,
@@ -290,7 +264,6 @@ class ClientProfileSerializer(serializers.ModelSerializer):
         ]
     )
 
-    # Country validation
     country = serializers.CharField(
         required=False,
         allow_blank=True,
@@ -302,7 +275,6 @@ class ClientProfileSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Country name must contain only letters and spaces.")
         return value.title().strip() if value else value
 
-    # Profile picture validation (extensions + size)
     def validate_profile_picture(self, value):
         if value:
             valid_extensions = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif']
@@ -311,7 +283,7 @@ class ClientProfileSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     f"Unsupported file type '{extension}'. Allowed: {', '.join(valid_extensions)}."
                 )
-            max_size = 5 * 1024 * 1024  # 5MB
+            max_size = 5 * 1024 * 1024
             if value.size > max_size:
                 raise serializers.ValidationError("Profile picture size should not exceed 5MB.")
         return value
@@ -346,9 +318,7 @@ class ClientProfileSerializer(serializers.ModelSerializer):
             'total_spent',
         ]
 
-    # Custom validation at the object level
     def validate(self, attrs):
-    # Get incoming values or fallback to existing instance values
         company = attrs.get('company_name') or (getattr(self.instance, 'company_name', '') or '')
         bio = attrs.get('bio') or (getattr(self.instance, 'bio', '') or '')
 
@@ -356,10 +326,6 @@ class ClientProfileSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Please provide at least company name or bio.")
         return attrs
 
-
-
-
-    # ✅ Safe create method (future-proof)
     def create(self, validated_data):
         user = self.context['request'].user
 
@@ -368,9 +334,7 @@ class ClientProfileSerializer(serializers.ModelSerializer):
 
         return ClientProfile.objects.create(user=user, **validated_data)
 
-    # ✅ Update only editable fields
     def update(self, instance, validated_data):
-        # Prevent updates to read-only user fields
         blocked_fields = ['email', 'username', 'verified']
         for field in blocked_fields:
             validated_data.pop(field, None)
@@ -379,11 +343,6 @@ class ClientProfileSerializer(serializers.ModelSerializer):
             setattr(instance, attr, value)
         instance.save()
         return instance
-    
-
-
-#---------- Project Serializer ----------
-
 
 
 class AdminUserSerializer(serializers.ModelSerializer):
@@ -410,17 +369,14 @@ class SkillMiniSerializer(serializers.ModelSerializer):
         model = Skill
         fields = ["id", "name"]
 
-        
 
 class ProjectSerializer(serializers.ModelSerializer):
-    # WRITE
     skills_required = serializers.PrimaryKeyRelatedField(
         many=True,
         queryset=Skill.objects.all(),
         write_only=True
     )
 
-    # READ
     skills = SkillMiniSerializer(
         source="skills_required",
         many=True,
@@ -436,10 +392,8 @@ class ProjectSerializer(serializers.ModelSerializer):
             "title",
             "description",
             "category",
-            "skills_required",  # write
-            "skills",           # read
-            "assignment_type",
-            "team_size",
+            "skills_required",
+            "skills",
             "budget_type",
             "fixed_budget",
             "hourly_min_rate",
@@ -451,18 +405,20 @@ class ProjectSerializer(serializers.ModelSerializer):
             "updated_at",
             "client",
         ]
-        read_only_fields = ["id", "created_at", "updated_at", "status"]
-
-    # ------------------- VALIDATIONS ------------------- #
+        read_only_fields = ["id", "status", "created_at", "updated_at"]
 
     def validate_title(self, value):
         if len(value.strip()) < 5:
-            raise serializers.ValidationError("Title must be at least 5 characters long.")
+            raise serializers.ValidationError(
+                "Title must be at least 5 characters long."
+            )
         return value
 
     def validate_description(self, value):
         if len(value.strip()) < 20:
-            raise serializers.ValidationError("Description must be at least 20 characters long.")
+            raise serializers.ValidationError(
+                "Description must be at least 20 characters long."
+            )
         return value
 
     def validate(self, attrs):
@@ -470,35 +426,30 @@ class ProjectSerializer(serializers.ModelSerializer):
         fixed_budget = attrs.get("fixed_budget")
         hourly_min = attrs.get("hourly_min_rate")
         hourly_max = attrs.get("hourly_max_rate")
-        assignment_type = attrs.get("assignment_type")
-        team_size = attrs.get("team_size")
 
-        # FIXED
         if budget_type == "fixed":
             if fixed_budget is None:
-                raise serializers.ValidationError("Fixed budget amount is required.")
+                raise serializers.ValidationError(
+                    "Fixed budget amount is required."
+                )
 
-        # HOURLY  (FIXED VALIDATION)
         if budget_type == "hourly":
             if hourly_min is None or hourly_max is None:
-                raise serializers.ValidationError("Hourly min and max required.")
-
-            if hourly_min >= hourly_max:
-                raise serializers.ValidationError("Hourly min must be < max.")
+                raise serializers.ValidationError(
+                    "Hourly min and max rates are required."
+                )
 
             if hourly_min <= 0 or hourly_max <= 0:
-                raise serializers.ValidationError("Hourly rates must be positive.")
+                raise serializers.ValidationError(
+                    "Hourly rates must be positive."
+                )
 
-        # TEAM / SINGLE
-        if assignment_type == "team" and not team_size:
-            raise serializers.ValidationError("Team size is required for team projects.")
-
-        if assignment_type == "single" and team_size:
-            raise serializers.ValidationError("Single freelancer projects cannot have a team size.")
+            if hourly_min >= hourly_max:
+                raise serializers.ValidationError(
+                    "Hourly min must be less than hourly max."
+                )
 
         return attrs
-
-    # ------------------- CREATE ------------------- #
 
     def _get_available_subscription(self, user):
         return (
@@ -521,12 +472,12 @@ class ProjectSerializer(serializers.ModelSerializer):
                 "No available subscription with remaining projects. Buy a new plan to continue."
             )
 
-        # Consume one credit
         subscription.remaining_projects -= 1
         subscription.save()
 
         project = Project.objects.create(client=client, **validated_data)
         project.skills_required.set(skills)
+        
         create_notifications.notify_user(
             recipient=client,
             notif_type="PROJECT_CREATED",
@@ -536,7 +487,6 @@ class ProjectSerializer(serializers.ModelSerializer):
         )
 
         admins = User.objects.filter(role="admin")
-
         for admin in admins:
             create_notifications.notify_user(
                 recipient=admin,
@@ -545,12 +495,19 @@ class ProjectSerializer(serializers.ModelSerializer):
                 message=f"{client.username} created a new project: {project.title}",
                 data={"project_id": project.id}
             )
-
+        
+        ActivityLog.objects.create(
+        actor=client,
+        activity_type="PROJECT_CREATED",
+        description="Project created",
+        metadata={
+            "client_id": client.id,
+            "project_id": project.id,
+            "title": project.title,
+        },
+    )
 
         return project
-    
-
-    # ------------------- UPDATE ------------------- #
 
     def update(self, instance, validated_data):
         skills = validated_data.pop("skills_required", None)
@@ -569,9 +526,6 @@ class ProjectMiniSerializer(serializers.ModelSerializer):
     class Meta:
         model = Project
         fields = ['id', 'title', 'budget_type', 'status']
-
-
-
 
 
 class UserSubscriptionSerializer(serializers.ModelSerializer):
@@ -594,8 +548,6 @@ class UserSubscriptionSerializer(serializers.ModelSerializer):
         return obj.is_active
 
 
-                        
-
 class CreatePaymentSerializer(serializers.Serializer):
     plan_id = serializers.IntegerField()
 
@@ -608,10 +560,6 @@ class CreatePaymentSerializer(serializers.Serializer):
 
         attrs["plan"] = plan
         return attrs
-    
-
-
-
 
 
 class ProposalScoreReadSerializer(serializers.ModelSerializer):
@@ -631,13 +579,6 @@ class ProposalScoreReadSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
-
-
-
-
-
-
-        
 class ClientProposalSerializer(serializers.ModelSerializer):
     freelancer = UserMiniSerializer(read_only=True)
     project = ProjectMiniSerializer(read_only=True)
@@ -657,7 +598,6 @@ class ClientProposalSerializer(serializers.ModelSerializer):
             'score',
         ]
 
-    
 
 class ProposalStatusUpdateSerializer(serializers.ModelSerializer):
     class Meta:
@@ -668,25 +608,25 @@ class ProposalStatusUpdateSerializer(serializers.ModelSerializer):
         proposal = self.instance
         project = proposal.project
         request = self.context.get("request")
-
         user = request.user if request else None
 
-        # -------------------------------
-        # HARD STOPS (system-controlled)
-        # -------------------------------
         if proposal.status == 'auto_rejected':
             raise serializers.ValidationError(
                 "Auto-rejected proposals cannot be modified."
             )
+
+        if proposal.status == 'accepted':
+            raise serializers.ValidationError(
+                "Accepted proposal status cannot be changed."
+            )
+
 
         if value == 'auto_rejected':
             raise serializers.ValidationError(
                 "Clients cannot auto-reject proposals."
             )
 
-        # -------------------------------
-        # WITHDRAWN (freelancer only)
-        # -------------------------------
+
         if value == 'withdrawn':
             if not user or user != proposal.freelancer:
                 raise serializers.ValidationError(
@@ -694,17 +634,7 @@ class ProposalStatusUpdateSerializer(serializers.ModelSerializer):
                 )
             return value
 
-        # -------------------------------
-        # ACCEPTED IS FINAL
-        # -------------------------------
-        if proposal.status == 'accepted':
-            raise serializers.ValidationError(
-                "Accepted proposal status cannot be changed."
-            )
 
-        # -------------------------------
-        # CLIENT-DRIVEN FLOW
-        # -------------------------------
         allowed_transitions = {
             'submitted': ['shortlisted', 'rejected'],
             'shortlisted': ['interviewing', 'rejected'],
@@ -716,10 +646,7 @@ class ProposalStatusUpdateSerializer(serializers.ModelSerializer):
                 f"Cannot change status from '{proposal.status}' to '{value}'."
             )
 
-        # -------------------------------
-        # SINGLE ASSIGNMENT SAFETY
-        # -------------------------------
-        if value == 'accepted' and project.assignment_type == 'single':
+        if value == 'accepted':
             already_accepted = project.proposals.filter(
                 status='accepted'
             ).exclude(id=proposal.id).exists()
@@ -730,5 +657,80 @@ class ProposalStatusUpdateSerializer(serializers.ModelSerializer):
                 )
 
         return value
+
+
+
+class FreelancerMiniSerializer(serializers.Serializer):
+    id = serializers.IntegerField(source="offer.freelancer.id")
+    name = serializers.CharField(source="offer.freelancer.user.get_full_name")
+    username = serializers.CharField(source="offer.freelancer.user.username")
+
+
+
+
+
+
+class CompletedProjectSerializer(serializers.ModelSerializer):
+    freelancer = serializers.SerializerMethodField()
+    client = serializers.SerializerMethodField()
+    completed_at = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Project
+        fields = (
+            "id",
+            "title",
+            "description",
+            "status",
+            "completed_at",
+            "freelancer",
+            "client",
+        )
+
+    def get_freelancer(self, project):
+        contract = self._get_completed_contract(project)
+        if not contract:
+            return None
+
+        user = contract.offer.freelancer.user
+        return {
+            "id": contract.offer.freelancer.id,
+            "username": user.username,
+            "full_name": user.get_full_name(),
+        }
+
+    def get_client(self, project):
+        contract = self._get_completed_contract(project)
+        if not contract:
+            return None
+
+        user = contract.offer.client
+        return {
+            "id": user.id,
+            "username": user.username,
+            "full_name": user.get_full_name(),
+        }
+
+    def get_completed_at(self, project):
+        contract = self._get_completed_contract(project)
+        return contract.ended_at if contract else None
+    
+
+    def _get_completed_contract(self, project):
+        if not hasattr(project, "_completed_contract"):
+            project._completed_contract = (
+                Contract.objects
+                .filter(
+                    offer__proposal__project=project,
+                    end_reason="completed",
+                )
+                .select_related(
+                    "offer__freelancer__user",
+                    "offer__client",
+                )
+                .order_by("-ended_at")
+                .first()
+            )
+        return project._completed_contract
 
 

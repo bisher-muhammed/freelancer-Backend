@@ -1,58 +1,47 @@
 from rest_framework import serializers
-from .models import (
-    Category, Skill, FreelancerProfile, FreelancerSkill,
-    PortfolioProject, EmploymentHistory, Education, Review,
-    Pricing
-)
-from apps.users.models import User
-from django.core.validators import RegexValidator
 from django.db import transaction
 import logging
 import json
 
+from .models import (
+    Category, Skill, FreelancerProfile, FreelancerSkill,
+    PortfolioProject, EmploymentHistory, Education, Pricing
+)
+
 logger = logging.getLogger(__name__)
 
 
-# ----------------------------
-# Custom Field for Flexible JSON/List Input
-# ----------------------------
+# ============================================================================
+# UTILITY FIELDS
+# ============================================================================
+
 class FlexibleJSONField(serializers.Field):
     """
-    A field that accepts JSON strings, Python lists/dicts, or comma-separated strings.
-    Handles data from both FormData (JSON strings) and JSON requests (already parsed).
+    Accepts JSON strings, Python lists/dicts, or comma-separated strings.
+    Normalizes all inputs to Python objects (list/dict).
     """
     def to_internal_value(self, data):
-        """Convert incoming data to Python object."""
-        # If it's already a list or dict, return as is
         if isinstance(data, (list, dict)):
             return data
         
-        # If it's a string, try to parse as JSON
         if isinstance(data, str):
-            # Try JSON parsing first
             try:
                 return json.loads(data)
             except (json.JSONDecodeError, ValueError):
-                # If not valid JSON, treat as comma-separated string
                 if ',' in data:
                     return [item.strip() for item in data.split(',') if item.strip()]
-                # Single value
                 return [data.strip()] if data.strip() else []
         
-        # For None or empty values
-        if data is None or data == '':
-            return []
-        
-        # Fallback: try to convert to list
-        return list(data) if data else []
+        return [] if data in (None, '') else list(data)
     
     def to_representation(self, value):
-        """Convert Python object to representation (for responses)."""
         return value
 
-# ----------------------------
-# Base Serializers
-# ----------------------------
+
+# ============================================================================
+# BASE SERIALIZERS
+# ============================================================================
+
 class CategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = Category
@@ -60,20 +49,19 @@ class CategorySerializer(serializers.ModelSerializer):
 
 
 class SkillSerializer(serializers.ModelSerializer):
-    category = CategorySerializer(read_only=True)
-    category_id = serializers.PrimaryKeyRelatedField(
-        queryset=Category.objects.all(), source='category', write_only=True, required=False
-    )
+    categories = CategorySerializer(many=True, read_only=True)
 
     class Meta:
         model = Skill
-        fields = ['id', 'name', 'category', 'category_id']
+        fields = ["id", "name", "categories"]
 
 
 class FreelancerSkillSerializer(serializers.ModelSerializer):
     skill = SkillSerializer(read_only=True)
     skill_id = serializers.PrimaryKeyRelatedField(
-        queryset=Skill.objects.all(), source='skill', write_only=True
+        queryset=Skill.objects.all(),
+        source='skill',
+        write_only=True
     )
 
     class Meta:
@@ -86,19 +74,7 @@ class PortfolioProjectSerializer(serializers.ModelSerializer):
     class Meta:
         model = PortfolioProject
         fields = ['id', 'title', 'description', 'link', 'created_at']
-        read_only_fields = ['id']
-
-
-class EmploymentHistorySerializer(serializers.ModelSerializer):
-    class Meta:
-        model = EmploymentHistory
-        fields = ['id', 'company', 'role', 'start_date', 'end_date']
-        read_only_fields = ['id']
-
-    def validate(self, data):
-        if data.get('end_date') and data['end_date'] < data['start_date']:
-            raise serializers.ValidationError("End date cannot be before start date.")
-        return data
+        read_only_fields = ['id', 'created_at']
 
 
 class EducationSerializer(serializers.ModelSerializer):
@@ -108,82 +84,98 @@ class EducationSerializer(serializers.ModelSerializer):
         read_only_fields = ['id']
 
     def validate_year_completed(self, value):
-        if value > 2100 or value < 1950:
-            raise serializers.ValidationError("Year is unrealistic.")
+        if not (1950 <= value <= 2100):
+            raise serializers.ValidationError("Year must be between 1950 and 2100.")
         return value
 
 
-class ReviewSerializer(serializers.ModelSerializer):
-    client = serializers.StringRelatedField(read_only=True)
-    client_id = serializers.PrimaryKeyRelatedField(
-        queryset=User.objects.all(), source='client', write_only=True
-    )
-
+class EmploymentHistorySerializer(serializers.ModelSerializer):
     class Meta:
-        model = Review
-        fields = ['id', 'client', 'client_id', 'rating', 'comment', 'created_at']
-        read_only_fields = ['created_at', 'id']
+        model = EmploymentHistory
+        fields = ['id', 'company', 'role', 'start_date', 'end_date']
+        read_only_fields = ['id']
 
-    def validate_rating(self, value):
-        if value < 1 or value > 5:
-            raise serializers.ValidationError("Rating must be between 1-5")
-        return value
+    def validate(self, data):
+        if data.get('end_date') and data.get('start_date'):
+            if data['end_date'] < data['start_date']:
+                raise serializers.ValidationError(
+                    "End date cannot be before start date."
+                )
+        return data
 
 
 class PricingSerializer(serializers.ModelSerializer):
     class Meta:
         model = Pricing
         fields = [
-            'id', 'pricing_type',
-            'hourly_rate', 'fixed_price', 'min_price', 'max_price',
-            'is_default'
+            'id', 'pricing_type', 'hourly_rate',
+            'min_hourly_rate', 'max_hourly_rate', 'is_default'
         ]
         read_only_fields = ['id']
 
-    def validate(self, data):
-        pricing_type = data.get('pricing_type')
-        if pricing_type == 'hourly' and not data.get('hourly_rate'):
-            raise serializers.ValidationError("Hourly rate is required.")
-        if pricing_type == 'fixed' and not data.get('fixed_price'):
-            raise serializers.ValidationError("Fixed price is required.")
-        if pricing_type == 'range':
-            if not data.get('min_price') or not data.get('max_price'):
-                raise serializers.ValidationError("Min & Max required.")
-            if data['min_price'] >= data['max_price']:
-                raise serializers.ValidationError("Min must be less than max.")
-        return data
+    def validate(self, attrs):
+        pricing_type = attrs.get('pricing_type', getattr(self.instance, 'pricing_type', None))
+        hourly_rate = attrs.get('hourly_rate', getattr(self.instance, 'hourly_rate', None))
+        min_rate = attrs.get('min_hourly_rate', getattr(self.instance, 'min_hourly_rate', None))
+        max_rate = attrs.get('max_hourly_rate', getattr(self.instance, 'max_hourly_rate', None))
+
+        if pricing_type == 'hourly':
+            if hourly_rate is None:
+                raise serializers.ValidationError({
+                    'hourly_rate': 'Hourly rate is required for hourly pricing.'
+                })
+            attrs['min_hourly_rate'] = None
+            attrs['max_hourly_rate'] = None
+
+        elif pricing_type == 'range':
+            if min_rate is None or max_rate is None:
+                raise serializers.ValidationError(
+                    'Both min_hourly_rate and max_hourly_rate are required for range pricing.'
+                )
+            if min_rate >= max_rate:
+                raise serializers.ValidationError(
+                    'min_hourly_rate must be less than max_hourly_rate.'
+                )
+            attrs['hourly_rate'] = None
+        else:
+            raise serializers.ValidationError('Invalid pricing_type.')
+
+        return attrs
 
 
-# ----------------------------
-# Freelancer Profile Serializer
-# ----------------------------
+# ============================================================================
+# FREELANCER PROFILE SERIALIZER
+# ============================================================================
+
 class FreelancerProfileSerializer(serializers.ModelSerializer):
+    # Read-only user fields
     user = serializers.StringRelatedField(read_only=True)
     user_id = serializers.IntegerField(source="user.id", read_only=True)
     email = serializers.EmailField(source="user.email", read_only=True)
     username = serializers.CharField(source="user.username", read_only=True)
 
-    # ============================
-    # Computed profile fields
-    # ============================
+    # Computed fields (read-only)
     skills_read = serializers.SerializerMethodField()
     education = serializers.SerializerMethodField()
     experience = serializers.SerializerMethodField()
+    portfolio = serializers.SerializerMethodField()
+    pricing = serializers.SerializerMethodField()
     skills_names = serializers.SerializerMethodField()
     categories_names = serializers.SerializerMethodField()
 
-    # ============================
-    # Write-only inputs
-    # ============================
+    # Write-only nested data inputs
     skills = FlexibleJSONField(write_only=True, required=False)
     categories = FlexibleJSONField(write_only=True, required=False)
     education_input = FlexibleJSONField(write_only=True, required=False)
     experience_input = FlexibleJSONField(write_only=True, required=False)
+    portfolio_input = FlexibleJSONField(write_only=True, required=False)
+    pricing_input = FlexibleJSONField(write_only=True, required=False)
 
-    # Files
+    # File fields
     resume = serializers.FileField(required=False, allow_null=True)
     profile_picture = serializers.ImageField(required=False, allow_null=True)
 
+    # Optional fields
     contact_number = serializers.CharField(
         required=False,
         allow_blank=True,
@@ -193,155 +185,215 @@ class FreelancerProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = FreelancerProfile
         fields = [
-            "id",
-            "user", "user_id", "username", "email",
+            
+            "id", "user", "user_id", "username", "email",
+            
+            
             "title", "bio", "contact_number", "hourly_rate",
-            "is_verified",
-
-            # Files
+            "is_verified", "total_reviews", "average_rating",
+            
+            
             "resume", "profile_picture",
-
-            # Meta
+            
+            # Timestamps
             "created_at", "updated_at",
-
-            # Skills / categories
+            
+            # Skills & categories
             "skills", "skills_read", "skills_names",
             "categories", "categories_names",
-
-            # Education / experience
+            
+            # Education & experience
             "education", "education_input",
             "experience", "experience_input",
+            
+            # Portfolio
+            "portfolio", "portfolio_input",
+            
+            # Pricing
+            "pricing", "pricing_input",
         ]
-
         read_only_fields = [
             "id", "user", "user_id", "username", "email",
-            "is_verified", "created_at", "updated_at",
+            "is_verified", "total_reviews", "average_rating",
+            "created_at", "updated_at",
         ]
 
-    # ============================
-    # Read helpers
-    # ============================
+    
+    
     def get_skills_read(self, obj):
+        """Return full skill objects with category info."""
         return FreelancerSkillSerializer(
-            obj.freelancerskill_set.select_related("skill", "skill__category"),
+            obj.skills.select_related("skill").prefetch_related("skill__categories"),
             many=True
         ).data
 
     def get_education(self, obj):
+        """Return all education entries."""
         return EducationSerializer(obj.education_set.all(), many=True).data
 
     def get_experience(self, obj):
-        return EmploymentHistorySerializer(obj.employmenthistory_set.all(), many=True).data
+        """Return all employment history entries."""
+        return EmploymentHistorySerializer(
+            obj.employmenthistory_set.all(),
+            many=True
+        ).data
+
+    def get_portfolio(self, obj):
+        """Return all portfolio projects."""
+        return PortfolioProjectSerializer(
+            obj.portfolioproject_set.all(),
+            many=True
+        ).data
+
+    def get_pricing(self, obj):
+        """Return all pricing entries."""
+        return PricingSerializer(
+            obj.pricing.all(),
+            many=True
+        ).data
 
     def get_skills_names(self, obj):
+        """Return flat list of skill names."""
         return list(
-            obj.freelancerskill_set
+            obj.skills
             .select_related("skill")
             .values_list("skill__name", flat=True)
         )
 
     def get_categories_names(self, obj):
-        return list(
-            obj.freelancerskill_set
-            .select_related("skill__category")
-            .values_list("skill__category__name", flat=True)
-            .distinct()
-        )
+        """Return unique list of category names from all skills."""
+        categories = set()
+        for freelancer_skill in obj.skills.select_related("skill").prefetch_related("skill__categories"):
+            for category in freelancer_skill.skill.categories.all():
+                categories.add(category.name)
+        return list(categories)
 
-    # ============================
-    # CREATE / UPDATE
-    # ============================
+    # ------------------------------------------------------------------------
+    # Create & Update
+    # ------------------------------------------------------------------------
+    
     @transaction.atomic
     def create(self, validated_data):
+        """Create a new freelancer profile with nested relations."""
         user = self.context["request"].user
 
+        # Extract nested data
         skills = validated_data.pop("skills", [])
         categories = validated_data.pop("categories", [])
-        education = validated_data.pop("education_input", [])
-        experience = validated_data.pop("experience_input", [])
-
+        education_list = validated_data.pop("education_input", [])
+        experience_list = validated_data.pop("experience_input", [])
+        portfolio_list = validated_data.pop("portfolio_input", [])
+        pricing_list = validated_data.pop("pricing_input", [])
         profile_picture = validated_data.pop("profile_picture", None)
         resume = validated_data.pop("resume", None)
 
+        # Create profile
         profile = FreelancerProfile.objects.create(user=user, **validated_data)
 
+        # Attach files
         if profile_picture:
             profile.profile_picture = profile_picture
         if resume:
             profile.resume = resume
-
         profile.save()
 
+        # Create nested relations
         self._save_skills(profile, skills, categories)
-        self._save_education(profile, education)
-        self._save_experience(profile, experience)
+        self._save_education(profile, education_list)
+        self._save_experience(profile, experience_list)
+        self._save_portfolio(profile, portfolio_list)
+        self._save_pricing(profile, pricing_list)
 
         return profile
 
     @transaction.atomic
     def update(self, instance, validated_data):
+        """Update existing profile and optionally refresh nested relations."""
+        # Extract nested data
         skills = validated_data.pop("skills", None)
         categories = validated_data.pop("categories", None)
-        education = validated_data.pop("education_input", None)
-        experience = validated_data.pop("experience_input", None)
-
+        education_list = validated_data.pop("education_input", None)
+        experience_list = validated_data.pop("experience_input", None)
+        portfolio_list = validated_data.pop("portfolio_input", None)
+        pricing_list = validated_data.pop("pricing_input", None)
         profile_picture = validated_data.pop("profile_picture", serializers.empty)
         resume = validated_data.pop("resume", serializers.empty)
 
+        # Update scalar fields
         for key, value in validated_data.items():
             setattr(instance, key, value)
 
+        # Handle file updates
         if profile_picture is not serializers.empty:
             instance.profile_picture = profile_picture or None
-
         if resume is not serializers.empty:
             instance.resume = resume or None
 
         instance.save()
 
+        # Update nested relations if provided
         if skills is not None:
-            self._save_skills(instance, skills or [], categories or [])
-        if education is not None:
-            self._save_education(instance, education or [])
-        if experience is not None:
-            self._save_experience(instance, experience or [])
+            self._save_skills(instance, skills, categories or [])
+        if education_list is not None:
+            self._save_education(instance, education_list)
+        if experience_list is not None:
+            self._save_experience(instance, experience_list)
+        if portfolio_list is not None:
+            self._save_portfolio(instance, portfolio_list)
+        if pricing_list is not None:
+            self._save_pricing(instance, pricing_list)
 
         return instance
 
-    # ----------------------------
-    # INTERNAL WRITE HELPERS
-    # ----------------------------
+    # ------------------------------------------------------------------------
+    # Helper methods for nested data
+    # ------------------------------------------------------------------------
+    
     def _save_skills(self, profile, skills, categories):
+        """Replace all skills for the profile."""
         if not isinstance(skills, (list, tuple)):
             skills = []
         if not isinstance(categories, (list, tuple)):
             categories = []
 
-        profile.freelancerskill_set.all().delete()
+        profile.skills.all().delete()
 
         for index, skill_name in enumerate(skills):
+            skill_name = str(skill_name).strip() if skill_name else ""
             if not skill_name:
                 continue
 
-            s_name = str(skill_name).strip()
-            if not s_name:
-                continue
-
+            # Determine category
+            category_names = []
             if index < len(categories) and categories[index]:
-                category_name = str(categories[index]).strip()
-            else:
-                category_name = "General"
+                cat_input = categories[index]
+                # Handle both single category and list of categories
+                if isinstance(cat_input, list):
+                    category_names = [str(c).strip() for c in cat_input if c]
+                else:
+                    category_names = [str(cat_input).strip()]
 
-            category, _ = Category.objects.get_or_create(name=category_name)
-            skill_obj, _ = Skill.objects.get_or_create(name=s_name, defaults={"category": category})
+            # Default to "General" if no categories provided
+            if not category_names:
+                category_names = ["General"]
 
+            # Get or create skill
+            skill_obj, _ = Skill.objects.get_or_create(name=skill_name)
+
+            # Associate categories with the skill
+            for category_name in category_names:
+                category, _ = Category.objects.get_or_create(name=category_name)
+                skill_obj.categories.add(category)
+
+            # Create freelancer-skill relation
             FreelancerSkill.objects.create(
                 freelancer=profile,
                 skill=skill_obj,
-                level=3,
+                level=3  # Default level
             )
 
     def _save_education(self, profile, education_list):
+        """Replace all education entries for the profile."""
         profile.education_set.all().delete()
 
         if not isinstance(education_list, (list, tuple)):
@@ -355,7 +407,7 @@ class FreelancerProfileSerializer(serializers.ModelSerializer):
             degree = edu.get("degree")
             year_completed = edu.get("year_completed") or edu.get("year")
 
-            if not institution or not degree or not year_completed:
+            if not all([institution, degree, year_completed]):
                 continue
 
             try:
@@ -367,9 +419,9 @@ class FreelancerProfileSerializer(serializers.ModelSerializer):
                 )
             except (ValueError, TypeError) as e:
                 logger.warning(f"Failed to create education entry: {e}")
-                continue
 
     def _save_experience(self, profile, experience_list):
+        """Replace all experience entries for the profile."""
         profile.employmenthistory_set.all().delete()
 
         if not isinstance(experience_list, (list, tuple)):
@@ -383,11 +435,12 @@ class FreelancerProfileSerializer(serializers.ModelSerializer):
             role = exp.get("role")
             start_date = exp.get("start_date")
 
-            if not company or not role or not start_date:
+            if not all([company, role, start_date]):
                 continue
 
+            # Handle nullable end_date
             end_date = exp.get("end_date")
-            if end_date == "" or end_date == "null":
+            if end_date in ("", "null", None):
                 end_date = None
 
             try:
@@ -399,5 +452,60 @@ class FreelancerProfileSerializer(serializers.ModelSerializer):
                     end_date=end_date
                 )
             except Exception as e:
-                logger.warning(f"Failed to create experience entry: {e}")
+                logger.warning(f"Failed to create employment history entry: {e}")
+
+    def _save_portfolio(self, profile, portfolio_list):
+        """Replace all portfolio projects for the profile."""
+        profile.portfolioproject_set.all().delete()
+
+        if not isinstance(portfolio_list, (list, tuple)):
+            return
+
+        for project in portfolio_list:
+            if not isinstance(project, dict):
                 continue
+
+            title = project.get("title")
+            description = project.get("description")
+
+            if not all([title, description]):
+                continue
+
+            # Handle optional link
+            link = project.get("link")
+            if link in ("", "null", None):
+                link = None
+
+            try:
+                PortfolioProject.objects.create(
+                    freelancer=profile,
+                    title=str(title),
+                    description=str(description),
+                    link=link
+                )
+            except Exception as e:
+                logger.warning(f"Failed to create portfolio project: {e}")
+
+    def _save_pricing(self, profile, pricing_list):
+        """Replace all pricing entries for the profile."""
+        profile.pricing.all().delete()
+
+        if not isinstance(pricing_list, (list, tuple)):
+            return
+
+        for pricing_data in pricing_list:
+            if not isinstance(pricing_data, dict):
+                continue
+
+            pricing_type = pricing_data.get("pricing_type")
+            if not pricing_type:
+                continue
+
+            try:
+                pricing_serializer = PricingSerializer(data=pricing_data)
+                if pricing_serializer.is_valid():
+                    pricing_serializer.save(freelancer=profile)
+                else:
+                    logger.warning(f"Invalid pricing data: {pricing_serializer.errors}")
+            except Exception as e:
+                logger.warning(f"Failed to create pricing entry: {e}")

@@ -78,8 +78,9 @@ class InvoiceService:
         Create an immutable invoice from a PAID payout batch.
         """
 
+        payout.refresh_from_db()
         if payout.status != "paid":
-            raise ValueError("Invoice can only be created for PAID payouts")
+            raise RuntimeError("Payout processor failed to mark payout as PAID")
 
         if hasattr(payout, "invoice"):
             raise ValueError("Invoice already exists for this payout")

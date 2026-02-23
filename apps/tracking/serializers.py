@@ -32,12 +32,7 @@ class DeviceSerializer(serializers.ModelSerializer):
         ]
 
 
-# =====================================================
-# Session Start
-# =====================================================
-# =====================================================
-# Session Start
-# =====================================================
+
 class WorkSessionStartSerializer(serializers.Serializer):
     contract_id = serializers.IntegerField()
     device_id = serializers.CharField(max_length=128)
@@ -198,9 +193,7 @@ class WorkSessionStopSerializer(serializers.Serializer):
         return session
 
 
-# =====================================================
-# Screenshot Upload
-# =====================================================
+
 class ScreenshotUploadSerializer(serializers.ModelSerializer):
     class Meta:
         model = Screenshot
@@ -272,9 +265,7 @@ class ScreenshotUploadSerializer(serializers.ModelSerializer):
         return screenshot
 
 
-# =====================================================
-# Idle Flush
-# =====================================================
+
 class IdleFlushSerializer(serializers.Serializer):
     session_id = serializers.IntegerField()
     idle_seconds = serializers.IntegerField(min_value=1)

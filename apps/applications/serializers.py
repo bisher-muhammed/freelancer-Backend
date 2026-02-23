@@ -5,9 +5,9 @@ from apps.applications.tasks import send_offer_created_email
 from apps.applications.tasks import send_offer_created_email
 from apps.notifications.services.create_notifications import notify_user
 from apps. users.models import Project, ClientProfile, User
-from apps. freelancer.models import FreelancerProfile, Skill
+from apps. freelancer.models import Skill
 from apps.users.serializers import ProjectSerializer
-from .models import EscrowPayment, Proposal,ProposalScore,Message,ChatRoom,SavedProject,Meeting,Offer
+from .models import Proposal,ProposalScore,Message,ChatRoom,SavedProject,Meeting,Offer
 from django.db.models import Q
 
 
@@ -543,20 +543,25 @@ class OfferCreateSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         request = self.context["request"]
+
         proposal = validated_data.pop("proposal")
 
+        # ✅ Get freelancer profile from proposal
+        freelancer_profile = proposal.freelancer.freelancer_profile
+
+        # ✅ Create offer properly
         offer = Offer.objects.create(
             proposal=proposal,
             client=request.user,
+            freelancer=freelancer_profile,   # ✅ FIXED
             **validated_data
         )
 
-        freelancer_user = proposal.freelancer
         project = proposal.project
 
-        # ✅ Notify Freelancer
+        # ✅ Notify Freelancer (recipient must be User not Profile)
         notify_user(
-            recipient=freelancer_user,
+            recipient=proposal.freelancer,   # User instance
             notif_type="OFFER_SENT",
             title="You received an offer",
             message=f"Client {request.user.username} sent you an offer for '{project.title}'.",
@@ -567,6 +572,7 @@ class OfferCreateSerializer(serializers.ModelSerializer):
         )
 
         return offer
+
 
 
 

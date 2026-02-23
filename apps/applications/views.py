@@ -463,9 +463,9 @@ class CreateEscrowCheckoutSession(APIView):
                     status=400
                 )
 
-            if hasattr(offer, "payment"):
+            if offer.has_escrow:
                 return Response(
-                    {"detail": "Payment already initiated."},
+                    {"detail": "Escrow already funded for this offer."},
                     status=400
                 )
 
@@ -482,31 +482,24 @@ class CreateEscrowCheckoutSession(APIView):
                 )
 
             session = stripe.checkout.Session.create(
-                payment_method_types=["card"],
                 mode="payment",
-                line_items=[
-                    {
-                        "price_data": {
-                            "currency": "inr",
-                            "product_data": {
-                                "name": f"Escrow for Project #{offer.proposal.project.id}",
-                            },
-                            "unit_amount": amount_cents,
+                payment_method_types=["card"],
+                line_items=[{
+                    "price_data": {
+                        "currency": "inr",
+                        "product_data": {
+                            "name": f"Escrow for Project #{offer.proposal.project.id}",
                         },
-                        "quantity": 1,
-                    }
-                ],
+                        "unit_amount": amount_cents,
+                    },
+                    "quantity": 1,
+                }],
                 metadata={
+                    "payment_type": "escrow",
                     "offer_id": str(offer.id),
                 },
                 success_url="http://localhost:3000/payment-success",
                 cancel_url="http://localhost:3000/payment-failed",
-            )
-
-            EscrowPayment.objects.create(
-                offer=offer,
-                amount=offer.total_budget,
-                status="pending",
             )
 
         return Response(
@@ -516,6 +509,8 @@ class CreateEscrowCheckoutSession(APIView):
             },
             status=201
         )
+
+
 
 
 

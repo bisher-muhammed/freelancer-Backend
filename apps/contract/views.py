@@ -1,19 +1,20 @@
 from amqp import NotFound
-from django.shortcuts import render
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.db.models import Q
+from django.db import transaction
+from django.utils import timezone
 from rest_framework import generics, permissions, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from django.shortcuts import get_object_or_404
 from apps.adminpanel.models import TrackingPolicy
 from apps.applications.serializers import MessageSerializer
-from apps.applications.models import Message
-from apps.contract.permissions import IsContractParty
-from apps.contract.serializers import AcceptTrackingPolicySerializer, ContractDocumentSerializer, ContractSerializer, ContractDocumentFolderSerializer, TrackingPolicySerializer
-from apps.contract.models import Contract, ContractDocument, ContractDocumentFolder
-from apps.freelancer.models import FreelancerProfile
+from apps.applications.models import EscrowPayment, Message
+from apps.billing.payouts import EscrowRefundProcessor
+from apps.contract.permissions import IsClient, IsContractParty
+from apps.contract.serializers import AcceptTrackingPolicySerializer, AdminTerminationRequestSerializer, ContractDocumentSerializer, ContractReviewCreateSerializer, ContractReviewListSerializer, ContractSerializer, ContractDocumentFolderSerializer, TrackingPolicySerializer
+from apps.contract.models import Contract, ContractDocument, ContractDocumentFolder, ContractReview, TerminationRequest
+from apps.contract.services.termination import settle_contract, terminate_contract
 
 
 
@@ -153,7 +154,7 @@ class ContractDocumentView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # 🔐 FILE SIZE LIMIT (20MB)
+        
         if uploaded_file.size > 20 * 1024 * 1024:
             return Response(
                 {"detail": "File too large (max 20MB)"},
@@ -325,3 +326,158 @@ class ActiveTrackingPolicyView(generics.RetrieveAPIView):
             raise NotFound("No active tracking policy available")
 
         return policy
+    
+
+
+class ContractTerminateRequestView(APIView):
+    permission_classes = [IsAuthenticated, IsClient]
+
+    def post(self, request, pk):
+        contract = get_object_or_404(Contract, pk=pk)
+
+        if contract.status != "active":
+            return Response(
+                {"detail": "Only active contracts can be terminated"},
+                status=400
+            )
+
+        if hasattr(contract, "termination_request"):
+            return Response(
+                {"detail": "Termination already requested"},
+                status=400
+            )
+
+        with transaction.atomic():
+            TerminationRequest.objects.create(
+                contract=contract,
+                requested_by=request.user,
+                reason=request.data.get("reason", "")
+            )
+
+        return Response(
+            {"detail": "Termination request submitted"},
+            status=201
+        )
+
+class AdminApproveTerminationView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request, pk):
+        tr = get_object_or_404(
+            TerminationRequest.objects.select_related("contract"),
+            pk=pk,
+            status="pending"
+        )
+
+        with transaction.atomic():
+            tr.status = "approved"
+            tr.reviewed_by = request.user
+            tr.reviewed_at = timezone.now()
+            tr.save()
+
+            terminate_contract(
+                contract=tr.contract,
+                actor=request.user
+            )
+
+        return Response({"detail": "Contract terminated"}, status=200)
+
+
+
+class AdminSettleContractView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request, pk):
+        contract = get_object_or_404(Contract, pk=pk)
+
+        settle_contract(
+            contract=contract,
+            actor=request.user
+        )
+
+        return Response(
+            {"detail": "Settlement completed (ledger only)"},
+            status=200
+        )
+
+
+
+class AdminProcessRefundView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request, pk):
+        contract = get_object_or_404(Contract, pk=pk)
+        escrow = contract.offer.payment  # one-to-one reverse lookup
+
+        EscrowRefundProcessor().process(
+            escrow_id=escrow.id,
+            actor=request.user
+        )
+
+        return Response(
+            {
+                "detail": "Refund executed",
+                "escrow_status": escrow.status,
+                "refunded_at": escrow.refunded_at,
+            },
+            status=200
+        )
+
+
+
+
+
+class AdminTerminationRequestListView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        qs = (
+            TerminationRequest.objects
+            .select_related(
+                "contract",
+                "contract__offer",
+                "contract__offer__client",
+                "contract__offer__freelancer__user",
+                "requested_by",
+            )
+            .filter(status__in=["pending", "approved"])
+            .order_by("-created_at")
+        )
+
+        serializer = AdminTerminationRequestSerializer(qs, many=True)
+        return Response(serializer.data, status=200)
+    
+
+class ContractReviewCreateView(generics.CreateAPIView):
+    """
+    Client submits a review after contract completion.
+    One review per contract.
+    """
+    serializer_class = ContractReviewCreateSerializer
+    permission_classes = [permissions.IsAuthenticated,IsClient]
+
+
+
+class FreelancerTestimonialListView(generics.ListAPIView):
+    """
+    Public testimonials for a freelancer.
+    """
+    serializer_class = ContractReviewListSerializer
+    permission_classes = [permissions.AllowAny]
+
+    def get_queryset(self):
+        freelancer_id = self.kwargs["freelancer_id"]
+
+        return (
+            ContractReview.objects
+            .filter(contract__offer__freelancer_id=freelancer_id)
+            .select_related(
+                "contract",
+                "contract__offer",
+                "contract__offer__client",
+                "contract__offer__freelancer",
+                "contract__offer__freelancer__freelancer_profile",
+            )
+            .order_by("-created_at")
+        )
+

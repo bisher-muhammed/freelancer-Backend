@@ -129,11 +129,6 @@ class Project(models.Model):
         ('expert', 'Expert'),
     ]
 
-    ASSIGNMENT_TYPES = [
-        ('single', 'Single Freelancer'),
-        ('team', 'Team of Freelancers'),
-    ]
-
     BUDGET_TYPES = [
         ('fixed', 'Fixed Price'),
         ('hourly', 'Hourly'),
@@ -146,7 +141,11 @@ class Project(models.Model):
         ('cancelled', 'Cancelled'),
     ]
 
-    client = models.ForeignKey(User, on_delete=models.CASCADE, related_name="projects")
+    client = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="projects"
+    )
 
     title = models.CharField(max_length=255)
     description = models.TextField()
@@ -154,50 +153,50 @@ class Project(models.Model):
     category = models.ForeignKey(Category, on_delete=models.SET_NULL, null=True)
     skills_required = models.ManyToManyField(Skill, related_name="projects")
 
-    assignment_type = models.CharField(
-        max_length=20, choices=ASSIGNMENT_TYPES, default='single'
+    budget_type = models.CharField(max_length=10, choices=BUDGET_TYPES)
+
+    fixed_budget = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True
     )
 
-    team_size = models.PositiveIntegerField(null=True, blank=True)
+    hourly_min_rate = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True
+    )
+    hourly_max_rate = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True
+    )
 
-    budget_type = models.CharField(max_length=10, choices=BUDGET_TYPES)
-    fixed_budget = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
-
-    hourly_min_rate = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    hourly_max_rate = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-
-    experience_level = models.CharField(max_length=20, choices=EXPERIENCE_LEVELS)
+    experience_level = models.CharField(
+        max_length=20,
+        choices=EXPERIENCE_LEVELS
+    )
 
     duration = models.CharField(max_length=50)
-    status = models.CharField(max_length=20, choices=STATUS, default='open')
+
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS,
+        default='open'
+    )
 
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
 
-    def clean(self):
-        if self.budget_type == "fixed":
-            if self.fixed_budget is None:
-                raise ValidationError("Fixed budget amount is required.")
-
-        # ----- HOURLY VALIDATION (FIXED) -----
-        if self.budget_type == "hourly":
-            if self.hourly_min_rate is None or self.hourly_max_rate is None:
-                raise ValidationError("Hourly min and max required.")
-
-            if self.hourly_min_rate >= self.hourly_max_rate:
-                raise ValidationError("Hourly min must be < max.")
-
-            if self.hourly_min_rate <= 0 or self.hourly_max_rate <= 0:
-                raise ValidationError("Hourly rates must be positive.")
-
-        if self.assignment_type == "team" and not self.team_size:
-            raise ValidationError("Team size is required for team projects.")
-
-        if self.assignment_type == "single" and self.team_size:
-            raise ValidationError("Single freelancer projects cannot have a team size.")
+    class Meta:
+        ordering = ["-created_at"]
 
     def __str__(self):
         return f"Project: {self.title} by {self.client.username}"
+
 
 
 

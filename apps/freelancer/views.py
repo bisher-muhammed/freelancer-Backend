@@ -1,70 +1,82 @@
-from rest_framework import viewsets, permissions, status
+from rest_framework import viewsets, permissions, status, generics
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
-from rest_framework.decorators import api_view, permission_classes, parser_classes, action
+from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from django.db import transaction
 from django.shortcuts import get_object_or_404
-from django.views.decorators.csrf import csrf_exempt
 import logging
 import json
-from rest_framework import generics
 
-from .models import FreelancerProfile, Category, Skill, FreelancerSkill, Education, EmploymentHistory
-from .serializers import FreelancerProfileSerializer, CategorySerializer, SkillSerializer
-from .utils import process_freelancer_document
+from apps.billing.selectors import InvoiceEarningsSelector
+
+from .models import (
+    FreelancerProfile, Category, PortfolioProject,
+    Skill, FreelancerSkill, Education, EmploymentHistory
+)
+from .serializers import (
+    FreelancerProfileSerializer, CategorySerializer,
+    PortfolioProjectSerializer, SkillSerializer
+)
 from apps.users.serializers import ProjectSerializer
 from apps.users.models import Project
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------
-# Skill / Category ViewSets
-# ---------------------------
+
+# ============================================================================
+# CATEGORY & SKILL VIEWSETS
+# ============================================================================
+
 class CategoryViewSet(viewsets.ModelViewSet):
+    """Manage skill categories."""
     queryset = Category.objects.all()
     serializer_class = CategorySerializer
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
 
 
 class SkillViewSet(viewsets.ModelViewSet):
+    """Manage skills."""
     queryset = Skill.objects.all()
     serializer_class = SkillSerializer
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
 
 
-# ---------------------------
-# Freelancer Profile ViewSet
-# ---------------------------
+# ============================================================================
+# FREELANCER PROFILE VIEWSET
+# ============================================================================
+
 class FreelancerProfileViewSet(viewsets.ModelViewSet):
+    """
+    Manage freelancer profiles with nested skills, education, and experience.
+    """
     queryset = FreelancerProfile.objects.select_related("user").prefetch_related(
-        "freelancerskill_set__skill__category",
-        "education_set",
-        "employmenthistory_set"
+    "skills__skill__categories",
+    "education_set",
+    "employmenthistory_set"
     )
+
     serializer_class = FreelancerProfileSerializer
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
     http_method_names = ['get', 'post', 'patch', 'put', 'delete']
 
-    # ------------------------------------
-    # Query Restriction
-    # ------------------------------------
     def get_queryset(self):
+        """Filter queryset based on user permissions."""
         user = self.request.user
         return self.queryset if user.is_staff else self.queryset.filter(user=user)
 
-    # ------------------------------------
-    # Object Restriction
-    # ------------------------------------
     def get_object(self):
+        """Get or create profile for the current user."""
         if self.request.user.role != "freelancer":
             raise PermissionDenied("Only freelancers can have profiles.")
 
+        # If no PK provided, get or create for current user
         if self.kwargs.get("pk") is None:
             obj, _ = FreelancerProfile.objects.get_or_create(user=self.request.user)
             return obj
 
+        # Otherwise, get specific profile with permission check
         obj = get_object_or_404(self.get_queryset(), pk=self.kwargs["pk"])
 
         if obj.user != self.request.user and not self.request.user.is_staff:
@@ -72,10 +84,8 @@ class FreelancerProfileViewSet(viewsets.ModelViewSet):
 
         return obj
 
-    # ------------------------------------
-    # List → Always return the current user's profile only
-    # ------------------------------------
     def list(self, request, *args, **kwargs):
+        """Return only the current user's profile."""
         if request.user.role != "freelancer":
             raise PermissionDenied("Only freelancers can access freelancer profiles.")
 
@@ -83,10 +93,8 @@ class FreelancerProfileViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(profile)
         return Response({"count": 1, "results": [serializer.data]})
 
-    # ------------------------------------
-    # Create
-    # ------------------------------------
     def create(self, request, *args, **kwargs):
+        """Create or update freelancer profile."""
         if FreelancerProfile.objects.filter(user=request.user).exists():
             return self.partial_update(request, *args, **kwargs)
 
@@ -96,27 +104,30 @@ class FreelancerProfileViewSet(viewsets.ModelViewSet):
         serializer.save(user=request.user)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
-    # ------------------------------------
-    # Update (PUT/PATCH)
-    # ------------------------------------
     def update(self, request, *args, **kwargs):
-        return self._update_common(request, partial=False)
+        """Full update of profile."""
+        return self._perform_update(request, partial=False)
 
     def partial_update(self, request, *args, **kwargs):
-        return self._update_common(request, partial=True)
+        """Partial update of profile."""
+        return self._perform_update(request, partial=True)
 
-    def _update_common(self, request, partial):
+    def _perform_update(self, request, partial):
+        """Common update logic."""
         profile = self.get_object()
         data = self._parse_form_data(request.data)
-        serializer = self.get_serializer(profile, data=data, partial=partial, context={"request": request})
+        serializer = self.get_serializer(
+            profile,
+            data=data,
+            partial=partial,
+            context={"request": request}
+        )
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(serializer.data)
 
-    # ------------------------------------
-    # Convert FormData "JSON strings" to actual Python objects
-    # ------------------------------------
     def _parse_form_data(self, data):
+        """Convert FormData JSON strings to Python objects."""
         parsed = data.copy()
         json_fields = ["skills", "categories", "education_input", "experience_input"]
 
@@ -129,81 +140,87 @@ class FreelancerProfileViewSet(viewsets.ModelViewSet):
                     pass
         return parsed
 
-    # ------------------------------------
-    # Dedicated file upload endpoint
-    # ------------------------------------
     @action(detail=True, methods=['post'], parser_classes=[MultiPartParser, FormParser])
     def upload_files(self, request, pk=None):
+        """Dedicated endpoint for file uploads."""
         profile = self.get_object()
+
         if "profile_picture" in request.FILES:
             profile.profile_picture = request.FILES["profile_picture"]
         if "resume" in request.FILES:
             profile.resume = request.FILES["resume"]
+
         profile.save()
         serializer = self.get_serializer(profile)
         return Response(serializer.data)
 
 
-# ---------------------------
-# Upload Resume + AI Extraction
-# ---------------------------
-@api_view(["POST"])
-@permission_classes([permissions.IsAuthenticated])
-@parser_classes([MultiPartParser, FormParser])
-def upload_resume(request):
-    user = request.user
-    profile, _ = FreelancerProfile.objects.get_or_create(user=user)
+# ============================================================================
+# PORTFOLIO PROJECT VIEWSET
+# ============================================================================
 
-    resume_file = request.FILES.get("resume")
-    profile_pic = request.FILES.get("profile_picture")
+class PortfolioProjectViewSet(viewsets.ModelViewSet):
+    """Manage portfolio projects for freelancers."""
+    serializer_class = PortfolioProjectSerializer
+    permission_classes = [permissions.IsAuthenticated]
 
-    if not resume_file and not profile_pic:
-        return Response({"error": "No file provided."}, status=status.HTTP_400_BAD_REQUEST)
+    def get_queryset(self):
+        """Return projects for the current user's freelancer profile."""
+        return PortfolioProject.objects.filter(
+            freelancer__user=self.request.user
+        )
 
-    try:
-        with transaction.atomic():
-            if resume_file:
-                profile.resume = resume_file
-            if profile_pic:
-                profile.profile_picture = profile_pic
-            profile.save()
-
-            extracted_data = {}
-            if resume_file:
-                file_path = profile.resume.path if hasattr(profile.resume, 'path') else None
-                if file_path:
-                    ai_response = process_freelancer_document(file_path)
-                    extracted_data = {
-                        "title": ai_response.get("positions", [""])[0] if ai_response.get("positions") else "",
-                        "bio": ai_response.get("bio", ""),
-                        "contact_number": "",
-                        "hourly_rate": "",
-                        "skills": [skill["name"] for skill in ai_response.get("skills", [])],
-                        "categories": list(set([skill.get("category") for skill in ai_response.get("skills", []) if skill.get("category")])) or ["General"],
-                        "education": ai_response.get("education", []),
-                        "experience": ai_response.get("experience", []),
-                    }
-
-            profile.refresh_from_db()
-            serializer = FreelancerProfileSerializer(profile, context={'request': request})
-            return Response({
-                "message": "Files uploaded successfully. Review the extracted data.",
-                "profile": serializer.data,
-                "extracted_data": extracted_data if extracted_data else None,
-            }, status=status.HTTP_200_OK)
-
-    except Exception as e:
-        logger.error(f"Failed to process files: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return Response({"error": f"Failed to process files: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    def perform_create(self, serializer):
+        """Associate project with current user's freelancer profile."""
+        freelancer = FreelancerProfile.objects.get(user=self.request.user)
+        serializer.save(freelancer=freelancer)
 
 
-# ---------------------------
-# Open Projects List
-# ---------------------------
+# ============================================================================
+# OPEN PROJECTS LIST
+# ============================================================================
+
 class OpenProjectListView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
     serializer_class = ProjectSerializer
 
     def get_queryset(self):
         return Project.objects.filter(status="open").order_by("-created_at")
+
+
+class FreelancerEarningsView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    def get(self, request):
+        if not hasattr(request.user, "freelancer_profile"): 
+            return Response(
+                {"detail": "Only freelancers can access earnings summary"},
+                status=403,
+            )
+
+        data = InvoiceEarningsSelector.freelancer_summary(
+            request.user.freelancer_profile  
+        )
+        return Response(data)
+
+
+class RelatedProjectsView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = ProjectSerializer
+
+    def get_queryset(self):
+        freelancer = self.request.user.freelancer_profile
+        skills = freelancer.skills.values_list("skill_id", flat=True)
+
+        return (
+            Project.objects
+            .filter(
+                skills_required__id__in=skills,
+                status="open"
+            )
+            .distinct()
+            .order_by("-created_at")
+        )
+
+
+
+

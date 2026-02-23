@@ -103,7 +103,7 @@ class ProposalScoringService:
         Project.skills_required vs FreelancerSkill
         """
         try:
-            profile = user.freelancerprofile
+            profile = user.freelancer_profile
         except FreelancerProfile.DoesNotExist:
             required = list(project.skills_required.values_list("name", flat=True))
             return 0.0, required
@@ -140,7 +140,7 @@ class ProposalScoringService:
         If end_date is NULL → today.
         """
         try:
-            profile = user.freelancerprofile
+            profile = user.freelancer_profile
         except FreelancerProfile.DoesNotExist:
             return 0.0
 
