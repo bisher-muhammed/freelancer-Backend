@@ -86,15 +86,17 @@ class Contract(models.Model):
     def mark_completed(self):
         self.status = "ended"
         self.end_reason = "completed"
+        self.completed_at = timezone.now()  
         self.ended_at = timezone.now()
-        self.save(update_fields=["status", "end_reason", "ended_at"])
+        self.save(update_fields=["status", "end_reason", "completed_at", "ended_at"])
 
 
     def terminate(self):
         self.status = "ended"
         self.end_reason = "terminated"
         self.ended_at = timezone.now()
-        self.save(update_fields=["status", "end_reason", "ended_at"])
+        self.terminated_at = timezone.now()  # add this
+        self.save(update_fields=["status", "end_reason", "ended_at", "terminated_at"])
 
     def mark_disputed(self):
         self.status = "disputed"

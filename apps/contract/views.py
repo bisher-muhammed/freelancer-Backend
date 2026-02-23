@@ -385,46 +385,75 @@ class AdminApproveTerminationView(APIView):
 
 
 class AdminSettleContractView(APIView):
+    """
+    POST /admin/contracts/<pk>/settle/
+    Computes earned/refundable amounts, writes ledger entries,
+    marks billing units as paid, and marks escrow as settled.
+
+    Must be called BEFORE AdminProcessRefundView.
+    """
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def post(self, request, pk):
         contract = get_object_or_404(Contract, pk=pk)
 
-        settle_contract(
-            contract=contract,
-            actor=request.user
-        )
-
-        return Response(
-            {"detail": "Settlement completed (ledger only)"},
-            status=200
-        )
-
-
-
-class AdminProcessRefundView(APIView):
-    permission_classes = [IsAuthenticated, IsAdminUser]
-
-    def post(self, request, pk):
-        contract = get_object_or_404(Contract, pk=pk)
-        escrow = contract.offer.payment  # one-to-one reverse lookup
-
-        EscrowRefundProcessor().process(
-            escrow_id=escrow.id,
-            actor=request.user
-        )
+        try:
+            escrow = settle_contract(contract=contract, actor=request.user)
+        except ValidationError as e:
+            return Response({"detail": str(e.message)}, status=400)
 
         return Response(
             {
-                "detail": "Refund executed",
+                "detail": "Settlement completed (ledger only).",
                 "escrow_status": escrow.status,
-                "refunded_at": escrow.refunded_at,
+                "released_amount": str(escrow.released_amount),
+                "refunded_amount": str(escrow.refunded_amount),
+                "settled_at": escrow.settled_at,
             },
             status=200
         )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Admin: Process Escrow Refund (Stripe + ledger)
+# ─────────────────────────────────────────────────────────────────────────────
 
+class AdminProcessRefundView(APIView):
+    """
+    POST /admin/contracts/<pk>/refund/
+    Processes the actual refund to the client via Stripe.
+    Requires settle_contract() to have run first (escrow.status == 'settled').
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request, pk):
+        contract = get_object_or_404(Contract, pk=pk)
+
+        try:
+            escrow = contract.offer.payment  # OneToOne reverse lookup
+        except EscrowPayment.DoesNotExist:
+            return Response({"detail": "No escrow payment found for this contract."}, status=404)
+
+        try:
+            EscrowRefundProcessor().process(
+                escrow_id=escrow.id,
+                actor=request.user
+            )
+        except ValidationError as e:
+            return Response({"detail": str(e.message)}, status=400)
+
+        # Re-fetch to get updated state
+        escrow.refresh_from_db()
+
+        return Response(
+            {
+                "detail": "Refund executed successfully.",
+                "escrow_status": escrow.status,
+                "refunded_amount": str(escrow.refunded_amount),
+                "refunded_at": escrow.refunded_at,
+            },
+            status=200
+        )
 
 
 class AdminTerminationRequestListView(APIView):

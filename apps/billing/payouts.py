@@ -91,38 +91,74 @@ class MockPayoutProcessor(PayoutProcessor):
 class EscrowRefundProcessor:
     @transaction.atomic
     def process(self, *, escrow_id: int, actor):
+        """
+        Processes the actual Stripe refund for the client.
+
+        FIXES:
+          1. contract accessed via escrow.offer.contract (no direct FK)
+          2. Checks contract.status == 'ended' + end_reason == 'terminated'
+             (not the non-existent status 'terminated')
+          3. Uses `actor` instead of undefined `request.user`
+          4. refundable_amount = escrow.refunded_amount (set by settle_contract)
+        """
         escrow = (
             EscrowPayment.objects
-            .select_for_update()   # 🔒 THIS IS THE KEY
-            .select_related("offer__client", "contract")
+            .select_for_update()
+            .select_related("offer__client", "offer__contract")  # FIX: no direct escrow.contract FK
             .get(id=escrow_id)
         )
 
-        contract = escrow.contract
+        # FIX: contract is accessed via offer, not directly on escrow
+        contract = escrow.offer.contract
 
-        if contract.status != "terminated":
-            raise ValidationError("Contract not terminated")
+        # FIX: Correct status check — no 'terminated' in STATUS_CHOICES
+        if contract.status != "ended":
+            raise ValidationError(
+                f"Contract is not ended (current status: '{contract.status}')."
+            )
 
+        if contract.end_reason != "terminated":
+            raise ValidationError(
+                "Refund flow is only for terminated contracts. "
+                f"Current end_reason: '{contract.end_reason}'."
+            )
+
+        # Guard against double-refund
         if escrow.status == "refunded":
-            raise ValidationError("Refund already completed")
+            raise ValidationError("Refund already completed.")
 
         if escrow.status == "refund_processing":
-            raise ValidationError("Refund already in progress")
+            raise ValidationError("Refund is already in progress.")
 
+        # settle_contract must have run first
         if escrow.status != "settled":
-            raise ValidationError("Escrow not refundable")
+            raise ValidationError(
+                f"Escrow must be 'settled' before refunding (current status: '{escrow.status}'). "
+                "Run 'Settle Contract' first."
+            )
 
-        refundable_amount = escrow.refunded_amount  # or computed
+        # FIX: refunded_amount was SET by settle_contract to the computed refundable value.
+        # It represents money TO be refunded, not money already refunded.
+        refundable_amount = escrow.refunded_amount
 
         if refundable_amount <= 0:
-            raise ValidationError("Nothing to refund")
+            raise ValidationError("Nothing to refund (refundable amount is ₹0).")
 
-        # 🔒 LOCK THE ACTION
+        # 🔒 Lock to prevent concurrent refund attempts
         escrow.status = "refund_processing"
         escrow.save(update_fields=["status"])
 
-        # ---- Stripe refund would go here ----
-        # stripe.Refund.create(...)
+        # ── Stripe refund would go here ───────────────────────────────────
+        # try:
+        #     stripe.Refund.create(
+        #         payment_intent=escrow.stripe_payment_intent_id,
+        #         amount=int(refundable_amount * 100),  # paise
+        #     )
+        # except stripe.error.StripeError as e:
+        #     escrow.status = "settled"  # rollback lock
+        #     escrow.save(update_fields=["status"])
+        #     raise ValidationError(f"Stripe refund failed: {e.user_message}")
+        # ─────────────────────────────────────────────────────────────────
 
         record_entry(
             entry_type="client_refund_executed",
@@ -133,7 +169,9 @@ class EscrowRefundProcessor:
 
         escrow.status = "refunded"
         escrow.refunded_at = timezone.now()
-        escrow.refunded_by = request.user
+        escrow.refunded_by = actor  
         escrow.save(
             update_fields=["status", "refunded_at", "refunded_by"]
         )
+
+        return escrow

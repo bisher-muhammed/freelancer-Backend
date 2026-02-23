@@ -15,17 +15,28 @@ def terminate_contract(contract, *, actor):
     if contract.status != "active":
         raise ValidationError("Only active contracts can be terminated")
 
-    contract.status = "ended"
-    contract.end_reason = "terminated"
-    contract.ended_at = timezone.now()
+    # Use the model method — keeps logic in one place
+    contract.terminate()  # sets status, end_reason, ended_at, saves
 
-    contract.save(
-        update_fields=["status", "end_reason", "ended_at"]
-    )
+    
+    project = contract.offer.proposal.project
+    project.status = "completed"
+    project.save(update_fields=["status"])
 
 @transaction.atomic
 def settle_contract(*, contract, actor):
-    # 🔒 Hard locks
+    """
+    Settles a terminated (or completed) contract:
+      1. Locks contract + escrow rows
+      2. Computes earned (approved billing units), platform fee, freelancer net, refundable
+      3. Writes ledger entries
+      4. Marks billing units as 'paid'
+      5. Marks escrow as 'settled'
+
+    FIX: Checks status='ended' AND end_reason='terminated' (or 'completed').
+         Previously checked for a non-existent status='terminated'.
+    """
+    # 🔒 Lock contract row
     contract = (
         Contract.objects
         .select_for_update()
@@ -33,19 +44,31 @@ def settle_contract(*, contract, actor):
         .get(pk=contract.pk)
     )
 
+    # FIX: Contract.STATUS_CHOICES has 'ended', not 'terminated'.
+    # Terminated contracts have status='ended' + end_reason='terminated'.
     if contract.status != "ended":
-        raise ValidationError("Contract must be ended")
+        raise ValidationError(
+            f"Contract must be ended before settlement (current status: '{contract.status}')."
+        )
 
-    escrow = (
-        EscrowPayment.objects
-        .select_for_update()
-        .get(offer=contract.offer, status="funded")
-    )
+    # 🔒 Lock escrow — must be 'funded' (not yet settled)
+    try:
+        escrow = (
+            EscrowPayment.objects
+            .select_for_update()
+            .get(offer=contract.offer, status="funded")
+        )
+    except EscrowPayment.DoesNotExist:
+        raise ValidationError(
+            "Escrow not found or not in 'funded' state. "
+            "It may have already been settled."
+        )
 
-    # ✅ Decide billing policy EXPLICITLY
+    # Lock and fetch approved billing units
+    # FIX: Also include 'locked' units — work submitted but pending payment
     units = BillingUnit.objects.select_for_update().filter(
         contract=contract,
-        status="approved"   
+        status__in=["approved", "locked"]
     )
 
     earned = (
@@ -54,7 +77,10 @@ def settle_contract(*, contract, actor):
     )
 
     if earned > escrow.amount:
-        raise ValidationError("Earned exceeds escrow")
+        raise ValidationError(
+            f"Earned amount (₹{earned}) exceeds escrow (₹{escrow.amount}). "
+            "Manual review required."
+        )
 
     platform_fee = (
         earned * contract.platform_fee_percentage / Decimal("100")
@@ -63,7 +89,7 @@ def settle_contract(*, contract, actor):
     freelancer_net = earned - platform_fee
     refundable = escrow.amount - earned
 
-
+    # ── Write ledger entries ──────────────────────────────────────────────
     if freelancer_net > 0:
         record_entry(
             entry_type="freelancer_net_earned",
@@ -90,8 +116,11 @@ def settle_contract(*, contract, actor):
             actor=actor,
         )
 
+    # ── Update escrow ─────────────────────────────────────────────────────
+    # FIX: refunded_amount stores the COMPUTED refundable value here.
+    # The actual Stripe refund is done separately in EscrowRefundProcessor.
     escrow.released_amount = earned
-    escrow.refunded_amount = refundable
+    escrow.refunded_amount = refundable   # Pending refund — not yet sent to Stripe
     escrow.status = "settled"
     escrow.settled_at = timezone.now()
     escrow.save(
@@ -103,6 +132,7 @@ def settle_contract(*, contract, actor):
         ]
     )
 
+    # Mark all approved/locked billing units as paid
     units.update(status="paid")
 
     return escrow
