@@ -17,8 +17,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # SECURITY WARNING: keep the secret key used in production secret!
 GOOGLE_API_KEY = os.getenv("GOOGLE_API")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
-SECRET_KEY = 'django-insecure-#q5_$j7=dl8se+qr9x(a)khua-sjtsz^m&6c@9x7kyo^dzv(_k'
-
+SECRET_KEY = os.getenv("SECRET_KEY")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 
