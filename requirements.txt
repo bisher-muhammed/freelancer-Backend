@@ -40,3 +40,6 @@ channels_redis
 daphne
 pycryptodome
 django-celery-beat
+dj_database_url
+psycopg[binary]
+

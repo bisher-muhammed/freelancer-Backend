@@ -26,7 +26,7 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='projectscoringconfig',
             name='experience_level',
-            field=models.CharField(choices=[('entry', 'Entry'), ('intermediate', 'Intermediate'), ('expert', 'Expert')], default=django.utils.timezone.now, max_length=20, unique=True),
+            field=models.CharField(choices=[('entry', 'Entry'), ('intermediate', 'Intermediate'), ('expert', 'Expert')], default=None, max_length=20, unique=True),
             preserve_default=False,
         ),
         migrations.AddField(
