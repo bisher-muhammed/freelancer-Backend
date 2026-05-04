@@ -115,11 +115,11 @@ import os
 
 DATABASES = {
     "default": dj_database_url.config(
-        default=os.getenv("DATABASE_URL"),
+        default=os.environ.get("DATABASE_URL"),
         conn_max_age=600,
-        ssl_require=True
     )
 }
+
 
 
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
