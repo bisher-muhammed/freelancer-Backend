@@ -31,11 +31,15 @@ ZEGO_SERVER_URL =  os.getenv('ZEGO_SERVER_URL')
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = False
 
-ALLOWED_HOSTS = ['*']
+ALLOWED_HOSTS = [
+    "54.88.141.82",
+]
+
 
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "https://freelancer-frontend-blue.vercel.app/"
 ]
 
 # allow credentials if you're using JWT or session auth
