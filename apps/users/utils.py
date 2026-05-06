@@ -1,29 +1,17 @@
 # apps/users/utils.py
 import random
 from django.core.cache import cache
-from datetime import timedelta
+from django.utils import timezone
 from typing import Optional
-from django. utils import timezone
 from .models import UserSubscription
 
-
-# import task lazily to avoid circular imports
-def _get_send_task():
-    try:
-        from .tasks import send_otp_email  # apps.users.tasks
-        return send_otp_email
-    except Exception:
-        return None
+# ✅ Direct import (NO lazy import)
+from apps.users.tasks import send_otp_email
 
 
 def generate_otp(length: int = 6) -> str:
-    """
-    Generate a numeric OTP of `length` digits as a string.
-    Example: '034591'
-    """
     if length <= 0:
         raise ValueError("length must be > 0")
-    # ensure leading zeros allowed
     return "".join(str(random.randint(0, 9)) for _ in range(length))
 
 
@@ -34,46 +22,34 @@ def create_and_send_otp(
     length: int = 6,
     send_async: bool = True,
 ) -> str:
-    """
-    Generate OTP, store in cache, and send via Celery task (if available).
-    Returns the OTP (useful for tests; in production you won't expose this).
-    - email: recipient email
-    - purpose: a namespace for OTPs (e.g., 'register', 'password_reset', ...)
-    - expiry_minutes: TTL for OTP in minutes
-    - length: digits in OTP
-    - send_async: if False, call the send task synchronously (useful for tests)
-    """
     if not email:
         raise ValueError("email is required")
 
     otp = generate_otp(length=length)
-    print(otp)
+    print("Generated OTP:", otp)
+
     cache_key = f"otp:{purpose}:{email.lower().strip()}"
 
-    # Store OTP in cache with TTL (seconds)
+    # Store OTP in cache
     cache.set(cache_key, otp, timeout=expiry_minutes * 60)
 
-    # Trigger sending
-    send_task = _get_send_task()
-    if send_task:
+    # ✅ ALWAYS call task (no silent skip)
+    try:
         if send_async:
-            send_task.delay(email, otp, purpose)
+            print("CALLING CELERY TASK", email, otp)
+            send_otp_email.delay(email, otp, purpose)
         else:
-            # synchronous call (for tests or debug)
-            send_task(email, otp, purpose)
-    else:
-        # If task not available, you may want to log or raise in dev
-        # For now, just pass — OTP still stored in cache
-        pass
+            print("CALLING SYNC EMAIL", email, otp)
+            send_otp_email(email, otp, purpose)
+    except Exception as e:
+        # ✅ Don’t hide errors anymore
+        print("ERROR SENDING OTP:", str(e))
+        raise e
 
     return otp
 
 
 def verify_otp(email: str, otp: str, purpose: str = "register", erase: bool = True) -> bool:
-    """
-    Verify OTP for the given email & purpose.
-    If erase=True and verification succeeds, the cached OTP will be deleted.
-    """
     if not email or not otp:
         return False
 
@@ -89,6 +65,8 @@ def verify_otp(email: str, otp: str, purpose: str = "register", erase: bool = Tr
         return True
 
     return False
+
+
 
 
 def expire_old_subscriptions(user):
