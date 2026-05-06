@@ -29,7 +29,7 @@ ZEGO_SERVER_URL =  os.getenv('ZEGO_SERVER_URL')
 
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = False
+DEBUG = True
 
 ALLOWED_HOSTS = [
     "54.88.141.82",
