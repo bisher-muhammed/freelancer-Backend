@@ -261,9 +261,6 @@ CACHES = {
     }
 }
 
-# Email backend for development (prints OTPs in console)
-EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
-DEFAULT_FROM_EMAIL = "bisherp297@gmail.com"
 
 
 
