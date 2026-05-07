@@ -53,7 +53,7 @@ path ("proposals/<int:pk>/status/",ClientProposalStatusUpdateView.as_view(),name
 path('proposals/<int:pk>/', ClientProposalDetailView.as_view(), name='client-proposal-detail'),
 path("client/statistics/", ClientStatisticsView.as_view(), name="client-statistics"),
 path("client/recent-projects/", ClientRecentProjectsView.as_view(), name="client-recent-projects"),
-path("completed-projects/",CompletedProjectsView.as_view(),name="client-completed-projects",),
+path("client/completed-projects/",CompletedProjectsView.as_view(),name="client-completed-projects",),
 
   
 path('', include(profile_router.urls)),  

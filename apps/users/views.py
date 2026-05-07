@@ -341,8 +341,9 @@ class CreateCheckoutSession(APIView):
                 "user_id": request.user.id,
                 "plan_id": plan.id,
             },
-            success_url="http://localhost:3000/payment-success",
-            cancel_url="http://localhost:3000/payment-failed",
+            
+            success_url=f"{settings.FRONTEND_URL}/payment-success",
+            cancel_url=f"{settings.FRONTEND_URL}/payment-failed",
         )
 
         return Response({"checkout_url": checkout_session.url})

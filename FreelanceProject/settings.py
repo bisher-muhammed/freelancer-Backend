@@ -33,7 +33,8 @@ DEBUG = True
 
 ALLOWED_HOSTS = [
     "54.88.141.82",
-    "api.freelancerhub.online"
+    "api.freelancerhub.online",
+    "localhost",
 
 ]
 
@@ -41,12 +42,14 @@ ALLOWED_HOSTS = [
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-    "https://freelancer-frontend-blue.vercel.app/"
+    "https://freelancer-frontend-blue.vercel.app/",
     "https://api.freelancerhub.online",
     "https://freelancerhub.online"
 
     
 ]
+FRONTEND_URL = "https://freelancerhub.online"
+
 
 # allow credentials if you're using JWT or session auth
 CORS_ALLOW_CREDENTIALS = True

@@ -337,3 +337,4 @@ class AdminFinanceStatsView(APIView):
                 "change_pct": pct(platform_fee_this, platform_fee_last),
             },
         })
+
