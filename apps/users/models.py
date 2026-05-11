@@ -214,10 +214,17 @@ class UserSubscription(models.Model):
         null=True,
         blank=True
     )
+    stripe_session_id = models.CharField(
+    max_length=255,
+    unique=True,
+    null=True,
+    blank=True,
+    )
 
     start_date = models.DateTimeField(default=timezone.now)
     end_date = models.DateTimeField()
     remaining_projects = models.IntegerField(default=0)
+    
 
     def save(self, *args, **kwargs):
         # Initialize only when the subscription is created

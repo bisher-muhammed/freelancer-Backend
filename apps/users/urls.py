@@ -6,6 +6,7 @@ ClientStatisticsView,
 ClientProposalStatusUpdateView,
 CompletedProjectsView,
 CreateCheckoutSession,
+FreelancerCompletedProjectsView,
 SendOTPView,
 RegisterView,
 SubscriptionPlanListView,
@@ -54,6 +55,7 @@ path('proposals/<int:pk>/', ClientProposalDetailView.as_view(), name='client-pro
 path("client/statistics/", ClientStatisticsView.as_view(), name="client-statistics"),
 path("client/recent-projects/", ClientRecentProjectsView.as_view(), name="client-recent-projects"),
 path("client/completed-projects/",CompletedProjectsView.as_view(),name="client-completed-projects",),
+path("freelancer/completed-projects/",FreelancerCompletedProjectsView.as_view(),name="freelancer-completed-projects",),
 
   
 path('', include(profile_router.urls)),  

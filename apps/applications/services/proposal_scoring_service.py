@@ -210,7 +210,7 @@ class ProposalScoringService:
         Conservative default until you add real metrics.
         """
         try:
-            profile = user.freelancerprofile
+            profile = user.freelancer_profile
         except FreelancerProfile.DoesNotExist:
             return 0.0
 

@@ -96,23 +96,23 @@ class StripeEscrowProcessor:
 
 class StripeSubscriptionProcessor:
     @transaction.atomic
-    def process(self, *, user_id, plan_id):
-        user = User.objects.select_for_update().get(id=user_id)
-        plan = SubscriptionPlan.objects.get(id=plan_id)
+    def process(self, *, user_id, plan_id, stripe_session_id):
 
-        # 🔒 Idempotency: active subscription already exists
+        # Stripe webhook idempotency
         if UserSubscription.objects.filter(
-            user=user,
-            end_date__gt=timezone.now(),
+            stripe_session_id=stripe_session_id
         ).exists():
             return
+
+        user = User.objects.select_for_update().get(id=user_id)
+        plan = SubscriptionPlan.objects.get(id=plan_id)
 
         subscription = UserSubscription.objects.create(
             user=user,
             plan=plan,
+            stripe_session_id=stripe_session_id,
         )
 
-        
         record_entry(
             entry_type="subscription",
             amount=plan.price,
@@ -127,3 +127,4 @@ class StripeSubscriptionProcessor:
             message="Your subscription payment was successful.",
             data={"subscription_id": subscription.id},
         )
+

@@ -400,64 +400,11 @@ class Meeting(models.Model):
         return self.proposal.freelancer
 
     # -------------------------
-    # VALIDATION (CREATION ONLY)
-    # -------------------------
-    def clean(self):
-        # ChatRoom must belong to proposal
-        if self.chat_room.proposal_id != self.proposal_id:
-            raise ValidationError("ChatRoom does not belong to this proposal")
-
-        # 🔥 Creation-only validations
-        if not self.pk:
-            now = timezone.now()
-
-            if self.start_time < now:
-                raise ValidationError("Start time must be in the future")
-
-            if self.end_time <= self.start_time:
-                raise ValidationError("End time must be after start time")
-
-            # Meeting type rules
-            if self.meeting_type == "interview":
-                if self.proposal.status != "shortlisted":
-                    raise ValidationError("Interview allowed only for shortlisted proposals")
-                if self.created_by != self.client:
-                    raise ValidationError("Only client can schedule interview")
-
-            if self.meeting_type == "review":
-                if self.proposal.status != "accepted":
-                    raise ValidationError("Review allowed only after hiring")
-
-            # Prevent overlapping meetings
-            overlapping = Meeting.objects.filter(
-                start_time__lt=self.end_time,
-                end_time__gt=self.start_time,
-                status__in=["scheduled", "ongoing"],
-            )
-
-            if overlapping.filter(proposal__project__client=self.client).exists():
-                raise ValidationError("Client already has another meeting during this time")
-
-            if overlapping.filter(proposal__freelancer=self.freelancer).exists():
-                raise ValidationError("Freelancer already has another meeting during this time")
-
-        # Prevent edits to completed meetings
-        if self.pk:
-            old = Meeting.objects.get(pk=self.pk)
-            if old.status == "completed":
-                raise ValidationError("Completed meetings cannot be modified")
-
-    # -------------------------
     # SAVE LOGIC
     # -------------------------
     def save(self, *args, **kwargs):
         if not self.zego_room_id:
             self.zego_room_id = f"mtg-{self.chat_room_id}-{uuid.uuid4().hex[:10]}"
-
-        # 🚨 Validate ONLY on creation
-        if not self.pk:
-            self.full_clean()
-
         super().save(*args, **kwargs)
 
     # -------------------------
@@ -486,7 +433,6 @@ class Meeting(models.Model):
 
     def mark_token_issued(self):
         self.last_token_issued_at = timezone.now()
-        # 🚫 no full_clean here
         self.save(update_fields=["last_token_issued_at"])
 
     # -------------------------
@@ -521,6 +467,7 @@ class Meeting(models.Model):
 
     def __str__(self):
         return f"{self.meeting_type} ({self.status}) – Proposal {self.proposal_id}"
+
 
 
 

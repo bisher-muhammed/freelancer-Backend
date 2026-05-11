@@ -397,27 +397,114 @@ class MeetingSerializer(serializers.ModelSerializer):
     class Meta:
         model = Meeting
         fields = "__all__"
+        proposal_status = serializers.CharField(source="proposal.status", read_only=True)
         read_only_fields = [
             "zego_room_id",
-            "created_by",   
+            "created_by",
             "status",
             "actual_started_at",
             "actual_ended_at",
             "created_at",
+            proposal_status,
         ]
+        
 
     def validate(self, attrs):
-        """
-        Only serializer-level concerns:
-        - Required fields presence
-        - Immutable fields on update
-        """
-        if self.instance:
-            if self.instance.status in ("completed", "cancelled"):
+        request = self.context["request"]
+        is_create = self.instance is None
+
+        # ── UPDATE: block edits on completed meetings ──────────────────────
+        if not is_create:
+            if self.instance.status == "completed":
                 raise serializers.ValidationError(
-                    "Completed or cancelled meetings cannot be modified."
+                    "Completed meetings cannot be modified."
                 )
+            return attrs
+
+        # ── All rules below apply to creation only ─────────────────────────
+        now          = timezone.now()
+        proposal     = attrs.get("proposal")
+        chat_room    = attrs.get("chat_room")
+        start_time   = attrs.get("start_time")
+        end_time     = attrs.get("end_time")
+        meeting_type = attrs.get("meeting_type")
+
+        # ── Time sanity ────────────────────────────────────────────────────
+        if start_time and start_time < now:
+            raise serializers.ValidationError(
+                {"start_time": "Start time must be in the future."}
+            )
+
+        if start_time and end_time and end_time <= start_time:
+            raise serializers.ValidationError(
+                {"end_time": "End time must be after start time."}
+            )
+
+        # ── ChatRoom must belong to the proposal ───────────────────────────
+        if chat_room and proposal and chat_room.proposal_id != proposal.pk:
+            raise serializers.ValidationError(
+                {"chat_room": "Chat room does not belong to this proposal."}
+            )
+
+        # ── Meeting-type rules ─────────────────────────────────────────────
+        if meeting_type == "interview":
+            if proposal is None:
+                raise serializers.ValidationError(
+                    {"proposal": "A proposal is required to schedule an interview."}
+                )
+            if proposal.status != "shortlisted":
+                raise serializers.ValidationError(
+                    {
+                        "meeting_type": (
+                            "Interview meetings can only be scheduled for shortlisted proposals. "
+                            f"This proposal is currently '{proposal.status}'."
+                        )
+                    }
+                )
+            client = proposal.project.client
+            if request.user != client:
+                raise serializers.ValidationError(
+                    {"meeting_type": "Only the client can schedule an interview."}
+                )
+
+        if meeting_type == "review":
+            if proposal is None:
+                raise serializers.ValidationError(
+                    {"proposal": "A proposal is required to schedule a review."}
+                )
+            if proposal.status != "accepted":
+                raise serializers.ValidationError(
+                    {
+                        "meeting_type": (
+                            "Review meetings can only be scheduled after the proposal is accepted. "
+                            f"This proposal is currently '{proposal.status}'."
+                        )
+                    }
+                )
+
+        # ── Overlap checks ─────────────────────────────────────────────────
+        if start_time and end_time and proposal:
+            overlapping = Meeting.objects.filter(
+                start_time__lt=end_time,
+                end_time__gt=start_time,
+                status__in=["scheduled", "ongoing"],
+            )
+
+            client     = proposal.project.client
+            freelancer = proposal.freelancer
+
+            if overlapping.filter(proposal__project__client=client).exists():
+                raise serializers.ValidationError(
+                    "Client already has another meeting scheduled during this time."
+                )
+
+            if overlapping.filter(proposal__freelancer=freelancer).exists():
+                raise serializers.ValidationError(
+                    "Freelancer already has another meeting scheduled during this time."
+                )
+
         return attrs
+
 
 
 

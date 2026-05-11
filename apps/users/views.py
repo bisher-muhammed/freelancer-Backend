@@ -392,14 +392,17 @@ def stripe_webhook(request):
     if payment_type == "subscription":
         user_id = metadata.get("user_id")
         plan_id = metadata.get("plan_id")
+        stripe_session_id = session.get("id")
 
-        if not user_id or not plan_id:
+        if not user_id or not plan_id or not stripe_session_id:
             return HttpResponse(status=400)
 
         StripeSubscriptionProcessor().process(
             user_id=user_id,
             plan_id=plan_id,
+            stripe_session_id=stripe_session_id,
         )
+
         return HttpResponse(status=200)
 
     return HttpResponse(status=400)
@@ -577,3 +580,28 @@ class CompletedProjectsView(generics.ListAPIView):
             )
             .order_by("-updated_at")
         )
+
+
+class FreelancerCompletedProjectsView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = CompletedProjectSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+
+        return (
+            Project.objects
+            .filter(
+                proposals__offer__freelancer__user=user,
+                proposals__offer__contract__status="ended",
+                proposals__offer__contract__end_reason="completed",
+            )
+            .distinct()
+            .select_related("client")
+            .prefetch_related(
+                "proposals__offer__freelancer__user",
+                "proposals__offer__contract",
+            )
+            .order_by("-updated_at")
+        )
+
