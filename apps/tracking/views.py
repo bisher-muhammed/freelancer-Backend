@@ -212,8 +212,9 @@ class FreelancerSessionTimelineView(APIView):
             id=session_id,
             user=request.user,
         )
-        serializer = WorkSessionDetailSerializer(session)
+        serializer = WorkSessionDetailSerializer(session, context={"request": request})
         return Response(serializer.data)
+    
 
 
 # ===============================
@@ -261,18 +262,17 @@ class AdminWorkSessionDetailView(APIView):
 
     def get(self, request, session_id):
         session = get_object_or_404(WorkSession, id=session_id)
-        session_serializer = WorkSessionDetailSerializer(session)
+        # FIX: pass context so FreelancerScreenshotSerializer.get_image works
+        session_serializer = WorkSessionDetailSerializer(session, context={"request": request})
 
         billing_units = BillingUnit.objects.filter(session=session)
         billing_serializer = BillingUnitListSerializer(billing_units, many=True)
 
-        return Response(
-            {
-                "session": session_serializer.data,
-                "billing_units": billing_serializer.data,
-            }
-        )
-
+        return Response({
+            "session": session_serializer.data,
+            "billing_units": billing_serializer.data,
+        })
+    
 
 
 class TimeBlockExplanationCreateView(APIView):
