@@ -48,8 +48,8 @@ CORS_ALLOWED_ORIGINS = [
 
     
 ]
-# FRONTEND_URL = "https://freelancerhub.online"
-FRONTEND_URL = "http://localhost:3000"
+FRONTEND_URL = "https://freelancerhub.online"
+# FRONTEND_URL = "http://localhost:3000"
 
 
 # allow credentials if you're using JWT or session auth
