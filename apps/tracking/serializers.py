@@ -509,3 +509,6 @@ class ActivityLogSerializer(serializers.ModelSerializer):
             "metadata",
             "created_at",
         ]
+
+
+

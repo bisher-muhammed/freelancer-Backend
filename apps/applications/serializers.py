@@ -640,13 +640,13 @@ class OfferCreateSerializer(serializers.ModelSerializer):
         offer = Offer.objects.create(
             proposal=proposal,
             client=request.user,
-            freelancer=freelancer_profile,   # ✅ FIXED
+            freelancer=freelancer_profile,   
             **validated_data
         )
 
         project = proposal.project
 
-        # ✅ Notify Freelancer (recipient must be User not Profile)
+        
         notify_user(
             recipient=proposal.freelancer,   # User instance
             notif_type="OFFER_SENT",
