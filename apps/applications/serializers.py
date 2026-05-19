@@ -3,6 +3,7 @@ from django.core.exceptions import ValidationError
 from django.utils import timezone
 from apps.applications.tasks import send_offer_created_email
 from apps.applications.tasks import send_offer_created_email
+from apps.contract.serializers import EscrowPaymentSerializer
 from apps.notifications.services.create_notifications import notify_user
 from apps. users.models import Project, ClientProfile, User
 from apps. freelancer.models import Skill
@@ -740,6 +741,9 @@ class OfferReadOnlySerializer(serializers.ModelSerializer):
 
     def get_valid_until_display(self, obj):
         return obj.valid_until.strftime("%d %b %Y, %I:%M %p")
+    
+
+    
 
 
 
@@ -808,6 +812,7 @@ class OfferRejectSerializer(serializers.ModelSerializer):
 class OfferAdminSerializer(serializers.ModelSerializer):
     total_paid = serializers.SerializerMethodField()
     remaining_budget = serializers.SerializerMethodField()
+    payment = EscrowPaymentSerializer(read_only=True)
 
     class Meta:
         model = Offer
@@ -815,6 +820,7 @@ class OfferAdminSerializer(serializers.ModelSerializer):
             "id",
             "total_budget",
             "total_paid",
+            "payment",
             "remaining_budget",
             "agreed_hourly_rate",
         ]

@@ -44,6 +44,12 @@ from .serializers import (
     CreatePaymentSerializer,
     UserSubscriptionSerializer,
 )
+from django.db.models import (
+    Sum,
+    F,
+    DecimalField,
+    ExpressionWrapper,
+)
 
 User = get_user_model()
 stripe.api_key = settings.STRIPE_SECRET_KEY
@@ -277,8 +283,20 @@ class ProjectViewSet(viewsets.ModelViewSet):
     serializer_class = ProjectSerializer
     permission_classes = [IsAuthenticated]
 
+    queryset = (
+        Project.objects
+        .annotate(
+            proposal_count=Count("proposals")
+        )
+        .select_related("client")
+    )
+
     def get_queryset(self):
-        return Project.objects.filter(client=self.request.user)
+
+        return (
+            self.queryset
+            .filter(client=self.request.user)
+        )
 
     def retrieve(self, request, pk=None):
         project = get_object_or_404(self.get_queryset(), pk=pk)
@@ -412,7 +430,9 @@ class UserSubscriptionViewSet(ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return UserSubscription.objects.filter(user=self.request.user)
+        return UserSubscription.objects.filter(
+            user=self.request.user
+        ).order_by("purchased_at")
 
 
 class BrowseFreelancers(ListAPIView):
@@ -514,7 +534,12 @@ class FreelancerProfileDetailView(generics.RetrieveAPIView):
 
         return profile
 
+
+
+
+
 class ClientStatisticsView(APIView):
+
     def get(self, request):
         user = request.user
 
@@ -524,11 +549,38 @@ class ClientStatisticsView(APIView):
             offer__proposal__project__client=user
         )
 
-        total_spent = EscrowPayment.objects.filter(
-            offer__proposal__project__client=user,
-            status__in=["funded", "settled"]
-        ).aggregate(
+        payments = EscrowPayment.objects.filter(
+            offer__proposal__project__client=user
+        )
+
+        # Actual money paid to freelancers
+        total_spent = payments.aggregate(
+            total=Sum("released_amount")
+        )["total"] or 0
+
+        # Money refunded back to client
+        total_refunded = payments.aggregate(
+            total=Sum("refunded_amount")
+        )["total"] or 0
+
+        # Total money ever added to escrow
+        total_funded = payments.aggregate(
             total=Sum("amount")
+        )["total"] or 0
+
+        # Current remaining escrow balance
+        escrow_balance = payments.aggregate(
+            total=Sum(
+                ExpressionWrapper(
+                    F("amount")
+                    - F("released_amount")
+                    - F("refunded_amount"),
+                    output_field=DecimalField(
+                        max_digits=12,
+                        decimal_places=2
+                    )
+                )
+            )
         )["total"] or 0
 
         data = {
@@ -545,6 +597,12 @@ class ClientStatisticsView(APIView):
             ).distinct().count(),
 
             "total_spent": total_spent,
+
+            "total_refunded": total_refunded,
+
+            "total_funded": total_funded,
+
+            "escrow_balance": escrow_balance,
         }
 
         return Response(data)

@@ -35,6 +35,7 @@ ALLOWED_HOSTS = [
     "54.88.141.82",
     "api.freelancerhub.online",
     "localhost",
+    "127.0.0.1"
 
 ]
 

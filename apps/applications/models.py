@@ -605,10 +605,12 @@ class Offer(models.Model):
 
 class EscrowPayment(models.Model):
     STATUS_CHOICES = [
-        ("pending", "Pending"),
-        ("funded", "Funded"),
-        ("settled", "Settled"),   
-        ("failed", "Failed"),
+    ("pending", "Pending"),
+    ("funded", "Funded"),
+    ("settled", "Settled"),
+    ("refund_processing", "Refund Processing"),
+    ("refunded", "Refunded"),
+    ("failed", "Failed"),
     ]
 
     offer = models.OneToOneField(
@@ -636,6 +638,12 @@ class EscrowPayment(models.Model):
         default=0
     )
 
+    refundable_amount = models.DecimalField(
+    max_digits=12,
+    decimal_places=2,
+    default=0
+    )
+
     status = models.CharField(
         max_length=20,
         choices=STATUS_CHOICES,
@@ -654,6 +662,19 @@ class EscrowPayment(models.Model):
     settled_at = models.DateTimeField(null=True, blank=True)
 
     refundable_until = models.DateTimeField(null=True, blank=True)
+
+    refunded_at = models.DateTimeField(
+    null=True,
+    blank=True
+    )
+
+    refunded_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="processed_escrow_refunds"
+    )
 
     class Meta:
         indexes = [

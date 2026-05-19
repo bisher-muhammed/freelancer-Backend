@@ -277,7 +277,7 @@ class ClientProfileSerializer(serializers.ModelSerializer):
 
     def validate_profile_picture(self, value):
         if value:
-            valid_extensions = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif']
+            valid_extensions = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif','PNG','JPG','JPEG','GIF','WEBP','AVIF']
             extension = value.name.split('.')[-1].lower()
             if extension not in valid_extensions:
                 raise serializers.ValidationError(
@@ -371,6 +371,7 @@ class SkillMiniSerializer(serializers.ModelSerializer):
 
 
 class ProjectSerializer(serializers.ModelSerializer):
+
     skills_required = serializers.PrimaryKeyRelatedField(
         many=True,
         queryset=Skill.objects.all(),
@@ -384,9 +385,13 @@ class ProjectSerializer(serializers.ModelSerializer):
     )
 
     client = UserMiniSerializer(read_only=True)
+    proposal_count = serializers.IntegerField(
+    read_only=True
+    )
 
     class Meta:
         model = Project
+
         fields = [
             "id",
             "title",
@@ -404,36 +409,53 @@ class ProjectSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
             "client",
+            "proposal_count",
         ]
-        read_only_fields = ["id", "status", "created_at", "updated_at"]
+
+        read_only_fields = [
+            "id",
+            "status",
+            "created_at",
+            "updated_at"
+        ]
 
     def validate_title(self, value):
+
         if len(value.strip()) < 5:
             raise serializers.ValidationError(
                 "Title must be at least 5 characters long."
             )
+
         return value
 
     def validate_description(self, value):
+
         if len(value.strip()) < 20:
             raise serializers.ValidationError(
                 "Description must be at least 20 characters long."
             )
+
         return value
 
     def validate(self, attrs):
+
         budget_type = attrs.get("budget_type")
+
         fixed_budget = attrs.get("fixed_budget")
+
         hourly_min = attrs.get("hourly_min_rate")
+
         hourly_max = attrs.get("hourly_max_rate")
 
         if budget_type == "fixed":
+
             if fixed_budget is None:
                 raise serializers.ValidationError(
                     "Fixed budget amount is required."
                 )
 
         if budget_type == "hourly":
+
             if hourly_min is None or hourly_max is None:
                 raise serializers.ValidationError(
                     "Hourly min and max rates are required."
@@ -451,66 +473,165 @@ class ProjectSerializer(serializers.ModelSerializer):
 
         return attrs
 
-    def _get_available_subscription(self, user):
-        return (
-            user.subscriptions.filter(
+    def _expire_old_subscriptions(self, user):
+
+        user.subscriptions.filter(
+            status="active",
+            end_date__lte=timezone.now()
+        ).update(status="expired")
+
+    def _activate_next_subscription(self, user):
+
+        active_subscription = (
+            user.subscriptions
+            .select_for_update()
+            .filter(
+                status="active",
                 end_date__gt=timezone.now(),
                 remaining_projects__gt=0
             )
-            .order_by("end_date")
             .first()
         )
 
+        if active_subscription:
+            return active_subscription
+
+        queued_subscription = (
+            user.subscriptions
+            .select_for_update()
+            .filter(status="queued")
+            .order_by("purchased_at")
+            .first()
+        )
+
+        if not queued_subscription:
+            return None
+
+        queued_subscription.activate()
+
+        return queued_subscription
+
+    def _get_available_subscription(self, user):
+
+        # Expire old subscriptions first
+        self._expire_old_subscriptions(user)
+
+        # Get currently active subscription
+        active_subscription = (
+            user.subscriptions
+            .select_for_update()
+            .filter(
+                status="active",
+                end_date__gt=timezone.now(),
+                remaining_projects__gt=0
+            )
+            .first()
+        )
+
+        if active_subscription:
+            return active_subscription
+
+        # Otherwise activate next queued subscription
+        return self._activate_next_subscription(user)
+    
+
+    
+
+    @transaction.atomic
     def create(self, validated_data):
-        skills = validated_data.pop("skills_required", [])
+
+        skills = validated_data.pop(
+            "skills_required",
+            []
+        )
+
         client = self.context["request"].user
 
         subscription = self._get_available_subscription(client)
 
         if not subscription:
             raise serializers.ValidationError(
-                "No available subscription with remaining projects. Buy a new plan to continue."
+                "No available subscription. Buy a new plan to continue."
             )
 
-        subscription.remaining_projects -= 1
-        subscription.save()
+        # Consume one project slot
+        subscription.consume_project()
 
-        project = Project.objects.create(client=client, **validated_data)
+        # Create project
+        project = Project.objects.create(
+            client=client,
+            subscription=subscription,
+            **validated_data
+        )
+
         project.skills_required.set(skills)
-        
+
+        # Activate next queued subscription immediately
+        # if current one became consumed
+        if subscription.status == "consumed":
+
+            next_subscription = (
+                client.subscriptions
+                .select_for_update()
+                .filter(status="queued")
+                .order_by("purchased_at")
+                .first()
+            )
+
+            if next_subscription:
+                next_subscription.activate()
+
         create_notifications.notify_user(
             recipient=client,
             notif_type="PROJECT_CREATED",
             title="Project Created",
-            message=f"Your project '{project.title}' has been successfully created.",
-            data={"project_id": project.id}
+            message=(
+                f"Your project '{project.title}' "
+                f"has been successfully created."
+            ),
+            data={
+                "project_id": project.id
+            }
         )
 
-        admins = User.objects.filter(role="admin")
+        admins = User.objects.filter(
+            role="admin"
+        )
+
         for admin in admins:
+
             create_notifications.notify_user(
                 recipient=admin,
                 notif_type="PROJECT_CREATED",
                 title="New Project Posted",
-                message=f"{client.username} created a new project: {project.title}",
-                data={"project_id": project.id}
+                message=(
+                    f"{client.username} created "
+                    f"a new project: {project.title}"
+                ),
+                data={
+                    "project_id": project.id
+                }
             )
-        
+
         ActivityLog.objects.create(
-        actor=client,
-        activity_type="PROJECT_CREATED",
-        description="Project created",
-        metadata={
-            "client_id": client.id,
-            "project_id": project.id,
-            "title": project.title,
-        },
-    )
+            actor=client,
+            activity_type="PROJECT_CREATED",
+            description="Project created",
+            metadata={
+                "client_id": client.id,
+                "project_id": project.id,
+                "title": project.title,
+            },
+        )
 
         return project
 
     def update(self, instance, validated_data):
-        skills = validated_data.pop("skills_required", None)
+
+        skills = validated_data.pop(
+            "skills_required",
+            None
+        )
 
         for field, value in validated_data.items():
             setattr(instance, field, value)
@@ -519,33 +640,68 @@ class ProjectSerializer(serializers.ModelSerializer):
             instance.skills_required.set(skills)
 
         instance.save()
+
         return instance
 
 
 class ProjectMiniSerializer(serializers.ModelSerializer):
+
     class Meta:
         model = Project
-        fields = ['id', 'title', 'budget_type', 'status']
+        fields = [
+            "id",
+            "title",
+            "budget_type",
+            "status"
+        ]
 
 
 class UserSubscriptionSerializer(serializers.ModelSerializer):
+
     is_active = serializers.SerializerMethodField()
+
+    is_queued = serializers.SerializerMethodField()
+
+    is_expired = serializers.SerializerMethodField()
 
     class Meta:
         model = UserSubscription
+
         fields = [
             "id",
             "user",
             "plan",
-            "start_date",
+            "status",
+            "purchased_at",
+            "activated_at",
             "end_date",
             "remaining_projects",
             "is_active",
+            "is_queued",
+            "is_expired",
         ]
-        read_only_fields = ["id", "start_date", "end_date", "remaining_projects", "is_active"]
+
+        read_only_fields = [
+            "id",
+            "purchased_at",
+            "activated_at",
+            "end_date",
+            "remaining_projects",
+            "is_active",
+            "is_queued",
+            "is_expired",
+        ]
 
     def get_is_active(self, obj):
         return obj.is_active
+
+    def get_is_queued(self, obj):
+        return obj.is_queued
+
+    def get_is_expired(self, obj):
+        return obj.is_expired
+
+
 
 
 class CreatePaymentSerializer(serializers.Serializer):

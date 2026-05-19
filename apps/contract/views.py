@@ -466,6 +466,7 @@ class AdminTerminationRequestListView(APIView):
                 "contract",
                 "contract__offer",
                 "contract__offer__client",
+                "contract__offer__payment",
                 "contract__offer__freelancer__user",
                 "requested_by",
             )

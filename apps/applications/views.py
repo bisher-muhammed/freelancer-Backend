@@ -416,6 +416,7 @@ class FreelancerOfferListView(generics.ListAPIView):
         freelancer_profile = FreelancerProfile.objects.get(
             user=self.request.user
         )
+    
 
         return (
             Offer.objects

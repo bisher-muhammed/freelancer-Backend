@@ -225,6 +225,7 @@ class InvoiceSerializer(serializers.ModelSerializer):
             "status",
             "issued_at",
             "created_at",
+            
         ]
 
     def get_freelancer_name(self, obj):
@@ -232,4 +233,4 @@ class InvoiceSerializer(serializers.ModelSerializer):
         return user.get_full_name() or user.email
 
     
-
+    

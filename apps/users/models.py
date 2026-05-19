@@ -146,6 +146,13 @@ class Project(models.Model):
         on_delete=models.CASCADE,
         related_name="projects"
     )
+    subscription = models.ForeignKey(
+        "UserSubscription",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="projects"
+    )
 
     title = models.CharField(max_length=255)
     description = models.TextField()
@@ -203,50 +210,144 @@ class Project(models.Model):
 
 
 class UserSubscription(models.Model):
+
+    STATUS_CHOICES = [
+        ("queued", "Queued"),
+        ("active", "Active"),
+        ("expired", "Expired"),
+        ("consumed", "Consumed"),
+    ]
+
     user = models.ForeignKey(
         User,
         on_delete=models.CASCADE,
         related_name="subscriptions"
     )
+
     plan = models.ForeignKey(
         SubscriptionPlan,
         on_delete=models.SET_NULL,
         null=True,
         blank=True
     )
+
     stripe_session_id = models.CharField(
-    max_length=255,
-    unique=True,
-    null=True,
-    blank=True,
+        max_length=255,
+        unique=True,
+        null=True,
+        blank=True,
     )
 
-    start_date = models.DateTimeField(default=timezone.now)
-    end_date = models.DateTimeField()
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default="queued"
+    )
+
+    purchased_at = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    activated_at = models.DateTimeField(
+        null=True,
+        blank=True
+    )
+
+    end_date = models.DateTimeField(
+        null=True,
+        blank=True
+    )
+
     remaining_projects = models.IntegerField(default=0)
-    
+
+    class Meta:
+        ordering = ["purchased_at"]
 
     def save(self, *args, **kwargs):
-        # Initialize only when the subscription is created
+
         if not self.pk:
             if not self.plan:
                 raise ValueError("Subscription must have a plan")
 
-            # Set expiry based on plan
-            self.end_date = self.start_date + timezone.timedelta(days=self.plan.duration_days)
-
-            # Set project limit
+            # Set project quota only on creation
             self.remaining_projects = self.plan.max_projects
 
         super().save(*args, **kwargs)
 
     @property
     def is_active(self):
-        """Active only if not expired AND user still has projects left."""
-        return self.remaining_projects > 0 and self.end_date > timezone.now()
+        return (
+            self.status == "active"
+            and self.end_date
+            and self.end_date > timezone.now()
+            and self.remaining_projects > 0
+        )
+
+    @property
+    def is_expired(self):
+        return (
+            self.end_date
+            and self.end_date <= timezone.now()
+        )
+
+    @property
+    def is_queued(self):
+        return self.status == "queued"
+
+    def activate(self):
+
+        if self.status == "active":
+            return
+
+        now = timezone.now()
+
+        self.status = "active"
+        self.activated_at = now
+        self.end_date = (
+            now + timezone.timedelta(
+                days=self.plan.duration_days
+            )
+        )
+
+        self.save(
+            update_fields=[
+                "status",
+                "activated_at",
+                "end_date",
+            ]
+        )
+
+    def expire(self):
+
+        self.status = "expired"
+
+        self.save(update_fields=["status"])
+
+    def consume_project(self):
+
+        if self.remaining_projects <= 0:
+            raise ValueError("No remaining projects")
+
+        self.remaining_projects -= 1
+
+        if self.remaining_projects <= 0:
+            self.status = "consumed"
+
+        self.save(
+            update_fields=[
+                "remaining_projects",
+                "status",
+            ]
+        )
 
     def __str__(self):
-        return f"{self.user.username} - {self.plan.name} ({self.remaining_projects} left)"
+        return (
+            f"{self.user.username} - "
+            f"{self.plan.name} - "
+            f"{self.status} "
+            f"({self.remaining_projects} left)"
+        )
+
 
 
 

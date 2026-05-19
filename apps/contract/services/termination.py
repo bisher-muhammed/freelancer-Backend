@@ -25,18 +25,7 @@ def terminate_contract(contract, *, actor):
 
 @transaction.atomic
 def settle_contract(*, contract, actor):
-    """
-    Settles a terminated (or completed) contract:
-      1. Locks contract + escrow rows
-      2. Computes earned (approved billing units), platform fee, freelancer net, refundable
-      3. Writes ledger entries
-      4. Marks billing units as 'paid'
-      5. Marks escrow as 'settled'
 
-    FIX: Checks status='ended' AND end_reason='terminated' (or 'completed').
-         Previously checked for a non-existent status='terminated'.
-    """
-    # 🔒 Lock contract row
     contract = (
         Contract.objects
         .select_for_update()
@@ -44,42 +33,45 @@ def settle_contract(*, contract, actor):
         .get(pk=contract.pk)
     )
 
-    # FIX: Contract.STATUS_CHOICES has 'ended', not 'terminated'.
-    # Terminated contracts have status='ended' + end_reason='terminated'.
     if contract.status != "ended":
         raise ValidationError(
-            f"Contract must be ended before settlement (current status: '{contract.status}')."
+            f"Contract must be ended before settlement "
+            f"(current status: '{contract.status}')."
         )
 
-    # 🔒 Lock escrow — must be 'funded' (not yet settled)
     try:
         escrow = (
             EscrowPayment.objects
             .select_for_update()
             .get(offer=contract.offer, status="funded")
         )
+
     except EscrowPayment.DoesNotExist:
         raise ValidationError(
-            "Escrow not found or not in 'funded' state. "
-            "It may have already been settled."
+            "Escrow not found or already settled."
         )
 
-    # Lock and fetch approved billing units
-    # FIX: Also include 'locked' units — work submitted but pending payment
-    units = BillingUnit.objects.select_for_update().filter(
+    # IMPORTANT:
+    # approved = reviewed and accepted
+    # locked   = included in payout batch
+    # paid     = already paid out
+    #
+    # all three are freelancer-earned money
+
+    earned_units = BillingUnit.objects.select_for_update().filter(
         contract=contract,
-        status__in=["approved", "locked"]
+        status__in=["approved", "locked", "paid"]
     )
 
     earned = (
-        units.aggregate(total=Sum("gross_amount"))["total"]
-        or Decimal("0.00")
+        earned_units.aggregate(
+            total=Sum("gross_amount")
+        )["total"] or Decimal("0.00")
     )
 
     if earned > escrow.amount:
         raise ValidationError(
-            f"Earned amount (₹{earned}) exceeds escrow (₹{escrow.amount}). "
-            "Manual review required."
+            f"Earned amount ({earned}) exceeds escrow ({escrow.amount})."
         )
 
     platform_fee = (
@@ -87,16 +79,17 @@ def settle_contract(*, contract, actor):
     ).quantize(Decimal("0.01"))
 
     freelancer_net = earned - platform_fee
+
     refundable = escrow.amount - earned
 
-    # ── Write ledger entries ──────────────────────────────────────────────
+    # ── Ledger Entries ───────────────────────────
+
     if freelancer_net > 0:
         record_entry(
             entry_type="freelancer_net_earned",
             amount=freelancer_net,
             user=contract.get_freelancer_user(),
             contract=contract,
-            actor=actor,
         )
 
     if platform_fee > 0:
@@ -104,7 +97,6 @@ def settle_contract(*, contract, actor):
             entry_type="platform_fee",
             amount=platform_fee,
             contract=contract,
-            actor=actor,
         )
 
     if refundable > 0:
@@ -113,26 +105,37 @@ def settle_contract(*, contract, actor):
             amount=refundable,
             user=contract.get_client(),
             contract=contract,
-            actor=actor,
         )
 
-    # ── Update escrow ─────────────────────────────────────────────────────
-    # FIX: refunded_amount stores the COMPUTED refundable value here.
-    # The actual Stripe refund is done separately in EscrowRefundProcessor.
+    # ── Escrow Accounting ───────────────────────
+
     escrow.released_amount = earned
-    escrow.refunded_amount = refundable   # Pending refund — not yet sent to Stripe
+
+    # pending refund amount
+    escrow.refundable_amount = refundable
+
+    # actual stripe-refunded amount
+    escrow.refunded_amount = Decimal("0.00")
+
     escrow.status = "settled"
     escrow.settled_at = timezone.now()
+
     escrow.save(
         update_fields=[
             "released_amount",
+            "refundable_amount",
             "refunded_amount",
             "status",
             "settled_at",
         ]
     )
 
-    # Mark all approved/locked billing units as paid
-    units.update(status="paid")
+    # ONLY approved units become paid
+    BillingUnit.objects.filter(
+        contract=contract,
+        status="approved"
+    ).update(status="paid")
 
     return escrow
+
+

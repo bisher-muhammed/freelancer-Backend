@@ -37,6 +37,7 @@ class OfferSummarySerializer(serializers.ModelSerializer):
 
 class EscrowPaymentSerializer(serializers.ModelSerializer):
     stripe_session_id = serializers.SerializerMethodField()
+
     remaining_amount = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,
@@ -45,22 +46,40 @@ class EscrowPaymentSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = EscrowPayment
+
         fields = [
             "id",
+
+            # Original escrow
             "amount",
+
+            # Financial tracking
             "released_amount",
+            "refundable_amount",
             "refunded_amount",
             "remaining_amount",
+
+            # State
             "status",
+
+            # Stripe
             "stripe_session_id",
+
+            # Dates
             "created_at",
             "funded_at",
             "settled_at",
+            "refunded_at",
             "refundable_until",
         ]
 
+        read_only_fields = fields
+
     def get_stripe_session_id(self, obj):
         return obj.stripe_payment_intent_id
+
+
+
 
 
 
@@ -353,6 +372,7 @@ class AdminTerminationRequestSerializer(serializers.ModelSerializer):
 
     def get_requested_by(self, obj):
         user = obj.requested_by
+
         return {
             "id": user.id,
             "email": user.email,
@@ -362,6 +382,13 @@ class AdminTerminationRequestSerializer(serializers.ModelSerializer):
     def get_contract(self, obj):
         contract = obj.contract
         offer = contract.offer
+
+        payment_data = None
+
+        if hasattr(offer, "payment"):
+            payment_data = EscrowPaymentSerializer(
+                offer.payment
+            ).data
 
         return {
             "id": contract.id,
@@ -373,6 +400,7 @@ class AdminTerminationRequestSerializer(serializers.ModelSerializer):
             "offer": {
                 "id": offer.id,
                 "total_budget": offer.total_budget,
+                "payment": payment_data,   # ← THIS IS THE IMPORTANT PART
             },
 
             "client": {
@@ -382,9 +410,13 @@ class AdminTerminationRequestSerializer(serializers.ModelSerializer):
 
             "freelancer": {
                 "id": offer.freelancer.user.id,
-                "name": offer.freelancer.user.get_full_name() or offer.freelancer.user.email,
+                "name": (
+                    offer.freelancer.user.get_full_name()
+                    or offer.freelancer.user.email
+                ),
             },
         }
+
     
 
 

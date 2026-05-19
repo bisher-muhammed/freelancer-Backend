@@ -95,23 +95,38 @@ class StripeEscrowProcessor:
 
 
 class StripeSubscriptionProcessor:
+
     @transaction.atomic
     def process(self, *, user_id, plan_id, stripe_session_id):
 
-        # Stripe webhook idempotency
+        # Prevent duplicate webhook processing
         if UserSubscription.objects.filter(
             stripe_session_id=stripe_session_id
         ).exists():
             return
 
         user = User.objects.select_for_update().get(id=user_id)
+
         plan = SubscriptionPlan.objects.get(id=plan_id)
 
+        # Check if user already has active subscription
+        active_subscription_exists = user.subscriptions.filter(
+            status="active",
+            end_date__gt=timezone.now(),
+            remaining_projects__gt=0
+        ).exists()
+
+        # Create new subscription
         subscription = UserSubscription.objects.create(
             user=user,
             plan=plan,
             stripe_session_id=stripe_session_id,
+            status="queued",
         )
+
+        # Activate immediately if no active subscription exists
+        if not active_subscription_exists:
+            subscription.activate()
 
         record_entry(
             entry_type="subscription",
@@ -123,8 +138,13 @@ class StripeSubscriptionProcessor:
         create_notifications.notify_user(
             recipient=user,
             notif_type="SUBSCRIPTION_ACTIVE",
-            title="Plan Activated ✅",
-            message="Your subscription payment was successful.",
-            data={"subscription_id": subscription.id},
+            title="Plan Purchased ✅",
+            message=(
+                "Your subscription was activated."
+                if subscription.status == "active"
+                else "Your subscription was added to queue."
+            ),
+            data={
+                "subscription_id": subscription.id
+            },
         )
-
