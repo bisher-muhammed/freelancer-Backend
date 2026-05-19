@@ -116,45 +116,65 @@ class VerifyOTPSerializer(serializers.Serializer):
 
 
 class LoginSerializer(serializers.Serializer):
+
     email = serializers.EmailField()
+
     password = serializers.CharField(write_only=True)
-    timezone = serializers.CharField(required=False, allow_blank=True)
+
+    timezone = serializers.CharField(
+        required=False,
+        allow_blank=True
+    )
 
     def validate(self, data):
+
         email = data.get("email").lower().strip()
+
         password = data.get("password")
+
         tz_name = data.get("timezone")
 
-        user = authenticate(email=email, password=password)
+        user = authenticate(
+            email=email,
+            password=password
+        )
+
         if not user:
-            raise serializers.ValidationError("Invalid email or password.")
+            raise serializers.ValidationError(
+                "Invalid email or password."
+            )
 
         if not user.is_active:
-            raise serializers.ValidationError("User account is disabled.")
+            raise serializers.ValidationError(
+                "User account is disabled."
+            )
 
         if tz_name:
+
             try:
+
                 ZoneInfo(tz_name)
+
                 user.last_detected_timezone = tz_name
+
                 if not user.timezone:
                     user.timezone = tz_name
-                user.save(update_fields=["timezone", "last_detected_timezone"])
+
+                user.save(
+                    update_fields=[
+                        "timezone",
+                        "last_detected_timezone"
+                    ]
+                )
+
             except Exception:
                 pass
 
-        refresh = RefreshToken.for_user(user)
+        data["user"] = user
 
-        return {
-            "refresh": str(refresh),
-            "access": str(refresh.access_token),
-            "user": {
-                "id": user.id,
-                "email": user.email,
-                "username": user.username,
-                "role": user.role,
-                "timezone": user.timezone,
-            },
-        }
+        return data
+
+
 
 
 class ForgotPasswordSerializer(serializers.Serializer):

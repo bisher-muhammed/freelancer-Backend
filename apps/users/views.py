@@ -1,4 +1,5 @@
 import logging
+from rest_framework_simplejwt.exceptions import TokenError
 import stripe
 import traceback
 from django.conf import settings
@@ -116,20 +117,141 @@ class VerifyOTPView(generics.GenericAPIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     
 class LoginView(generics.GenericAPIView):
+
     serializer_class = LoginSerializer
+
     permission_classes = [AllowAny]
 
     def post(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        return Response(
+
+        serializer = self.get_serializer(
+            data=request.data
+        )
+
+        serializer.is_valid(
+            raise_exception=True
+        )
+
+        user = serializer.validated_data["user"]
+
+        refresh = RefreshToken.for_user(user)
+
+        access_token = str(refresh.access_token)
+
+        refresh_token = str(refresh)
+
+        response = Response(
             {
                 "success": True,
                 "message": "Login successful.",
-                "data": serializer.validated_data
+                "user": {
+                    "id": user.id,
+                    "email": user.email,
+                    "username": user.username,
+                    "role": user.role,
+                    "timezone": user.timezone,
+                }
             },
             status=status.HTTP_200_OK
         )
+
+        response.set_cookie(
+            key="access_token",
+            value=access_token,
+            httponly=True,
+            secure=True,  # False locally
+            samesite="None",
+            max_age=60 * 60,
+        )
+
+        response.set_cookie(
+            key="refresh_token",
+            value=refresh_token,
+            httponly=True,
+            secure=True,
+            samesite="Lax",
+            max_age=30 * 24 * 60 * 60,
+        )
+
+        return response
+
+
+class RefreshTokenView(APIView):
+
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+
+        refresh_token = request.COOKIES.get(
+            "refresh_token"
+        )
+
+        if not refresh_token:
+
+            return Response(
+                {"detail": "No refresh token"},
+                status=401
+            )
+
+        try:
+
+            refresh = RefreshToken(refresh_token)
+
+            access_token = str(
+                refresh.access_token
+            )
+
+            response = Response({
+                "success": True
+            })
+
+            response.set_cookie(
+                key="access_token",
+                value=access_token,
+                httponly=True,
+                secure=True,
+                samesite="Lax",
+                max_age=60 * 60,
+            )
+
+            return response
+
+        except TokenError:
+
+            return Response(
+                {"detail": "Invalid refresh token"},
+                status=401
+            )
+
+
+
+class LogoutView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+
+        refresh_token = request.COOKIES.get(
+            "refresh_token"
+        )
+
+        if refresh_token:
+            try:
+                token = RefreshToken(refresh_token)
+                token.blacklist()
+            except Exception:
+                pass
+
+        response = Response({
+            "success": True
+        })
+
+        response.delete_cookie("access_token")
+        response.delete_cookie("refresh_token")
+
+        return response
+
+
 
 class ForgotPasswordView(generics.GenericAPIView):
     serializer_class = ForgotPasswordSerializer
@@ -440,7 +562,17 @@ class BrowseFreelancers(ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return FreelancerProfile.objects.all()
+
+        return (
+            FreelancerProfile.objects
+            .filter(is_verified=True)
+            .exclude(
+                offers__contract__status="active"
+            )
+            .distinct()
+        )
+
+    
 
 
 class ClientProposalListView(generics.ListAPIView):

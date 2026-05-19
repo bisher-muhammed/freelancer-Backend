@@ -7,6 +7,7 @@ ClientProposalStatusUpdateView,
 CompletedProjectsView,
 CreateCheckoutSession,
 FreelancerCompletedProjectsView,
+LogoutView,
 SendOTPView,
 RegisterView,
 SubscriptionPlanListView,
@@ -25,7 +26,10 @@ BrowseFreelancers,
 ClientProposalListView,
 ClientProposalStatusUpdateView ,
 FreelancerProfileDetailView,
-ClientProposalDetailView
+ClientProposalDetailView,
+LogoutView,
+RefreshTokenView
+
 )
 
 
@@ -38,6 +42,8 @@ urlpatterns = [
 path('send-otp/', SendOTPView.as_view(), name='send-otp'),
 path('register/', RegisterView.as_view(), name='register'),
 path('verify-otp/', VerifyOTPView.as_view(), name='verify-otp'),
+path('logout/', LogoutView.as_view(), name='logout'),
+path('refresh-token/', RefreshTokenView.as_view(), name='refresh-token'),
 path('login/', LoginView.as_view(), name='login'),
 path('google-login/', google_login, name='google-login'),
 path('forgot-password/', ForgotPasswordView.as_view(), name='forgot-password'),  
@@ -56,6 +62,7 @@ path("client/statistics/", ClientStatisticsView.as_view(), name="client-statisti
 path("client/recent-projects/", ClientRecentProjectsView.as_view(), name="client-recent-projects"),
 path("client/completed-projects/",CompletedProjectsView.as_view(),name="client-completed-projects",),
 path("freelancer/completed-projects/",FreelancerCompletedProjectsView.as_view(),name="freelancer-completed-projects",),
+
 
   
 path('', include(profile_router.urls)),  
