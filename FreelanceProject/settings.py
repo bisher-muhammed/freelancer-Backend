@@ -43,9 +43,10 @@ ALLOWED_HOSTS = [
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-    "https://freelancer-frontend-blue.vercel.app/",
+    "https://freelancer-frontend-blue.vercel.app",
     "https://api.freelancerhub.online",
-    "https://freelancerhub.online"
+    "https://freelancerhub.online",
+    "https://www.freelancerhub.online", 
 
     
 ]
