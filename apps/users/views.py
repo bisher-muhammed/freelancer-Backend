@@ -159,7 +159,7 @@ class LoginView(generics.GenericAPIView):
             key="access_token",
             value=access_token,
             httponly=True,
-            secure=True,  # False locally
+            secure=False,  # False locally
             samesite="Lax",  # "None" for production, "Lax" for local testing
             max_age=60 * 60,
         )
@@ -168,7 +168,7 @@ class LoginView(generics.GenericAPIView):
             key="refresh_token",
             value=refresh_token,
             httponly=True,
-            secure=True,
+            secure=False,
             samesite="Lax",
             max_age=30 * 24 * 60 * 60,
         )
@@ -209,7 +209,7 @@ class RefreshTokenView(APIView):
                 key="access_token",
                 value=access_token,
                 httponly=True,
-                secure=True,
+                secure=False,  # False locally
                 samesite="Lax",
                 max_age=60 * 60,
             )
