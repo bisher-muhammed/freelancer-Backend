@@ -16,7 +16,7 @@ from apps.freelancer.models import Skill
 from apps.freelancer.serializers import FreelancerProfileSerializer
 from apps.adminpanel.models import SubscriptionPlan
 from apps.applications.models import Proposal, ProposalScore
-from apps.notifications.services import create_notifications
+from apps.notifications.services.create_notifications import notify_user
 from apps.notifications.services.activity import log_activity
 
 User = get_user_model()
@@ -355,13 +355,31 @@ class ClientProfileSerializer(serializers.ModelSerializer):
         return ClientProfile.objects.create(user=user, **validated_data)
 
     def update(self, instance, validated_data):
+
+        
+
         blocked_fields = ['email', 'username', 'verified']
+
         for field in blocked_fields:
             validated_data.pop(field, None)
 
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
+
         instance.save()
+        print("✅ Client profile updated successfully.")
+
+        # Test realtime notification
+        notify_user(
+            recipient=instance.user,
+            notif_type="PROFILE_UPDATED",
+            title="Profile Updated",
+            message="Your profile information was updated successfully.",
+            data={"user_id": instance.id}
+        )
+        print("✅ Notification sent for profile update.")
+        
+
         return instance
 
 
@@ -601,7 +619,7 @@ class ProjectSerializer(serializers.ModelSerializer):
             if next_subscription:
                 next_subscription.activate()
 
-        create_notifications.notify_user(
+        notify_user(
             recipient=client,
             notif_type="PROJECT_CREATED",
             title="Project Created",
@@ -620,7 +638,7 @@ class ProjectSerializer(serializers.ModelSerializer):
 
         for admin in admins:
 
-            create_notifications.notify_user(
+            notify_user(
                 recipient=admin,
                 notif_type="PROJECT_CREATED",
                 title="New Project Posted",

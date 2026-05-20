@@ -541,11 +541,11 @@ class OfferAcceptView(generics.UpdateAPIView):
             data={"offer_id": offer.id}
         )
 
-        # ✅ Notify Client
+        
         notify_user(
             recipient=client,
             notif_type="OFFER_ACCEPTED",
-            title="Offer Accepted 🎉",
+            title="Offer Accepted ",
             message=f"{freelancer.username} accepted your offer for '{project.title}'.",
             data={"offer_id": offer.id}
         )

@@ -160,7 +160,7 @@ class LoginView(generics.GenericAPIView):
             value=access_token,
             httponly=True,
             secure=True,  # False locally
-            samesite="None",
+            samesite="Lax",  # "None" for production, "Lax" for local testing
             max_age=60 * 60,
         )
 

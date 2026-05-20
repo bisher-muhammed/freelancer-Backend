@@ -15,6 +15,7 @@ class Notification(models.Model):
         ("OFFER_ACCEPTED", "Offer Accepted"),
         ("CONTRACT_CREATED", "Contract Created"),
         ("PAYMENT_COMPLETED", "Payment Completed"),
+        ("PROFILE_UPDATED", "Profile Updated"),
         ("SYSTEM", "System Notification"),
     ]
 
