@@ -760,7 +760,7 @@ class CompletedProjectsView(generics.ListAPIView):
             .filter(
                 client=user,
                 proposals__offer__contract__status="ended",
-                proposals__offer__contract__end_reason="completed",
+                proposals__offer__contract__end_reason__in=["completed", "terminated"],
             )
             .distinct()
             .select_related("client")
@@ -784,7 +784,7 @@ class FreelancerCompletedProjectsView(generics.ListAPIView):
             .filter(
                 proposals__offer__freelancer__user=user,
                 proposals__offer__contract__status="ended",
-                proposals__offer__contract__end_reason="completed",
+                proposals__offer__contract__end_reason__in=["completed", "terminated"],
             )
             .distinct()
             .select_related("client")
