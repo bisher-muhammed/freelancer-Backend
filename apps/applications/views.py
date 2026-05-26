@@ -499,8 +499,8 @@ class CreateEscrowCheckoutSession(APIView):
                     "payment_type": "escrow",
                     "offer_id": str(offer.id),
                 },
-                success_url="http://localhost:3000/payment-success",
-                cancel_url="http://localhost:3000/payment-failed",
+                success_url=f"{settings.FRONTEND_URL}/payment-success",
+                cancel_url=f"{settings.FRONTEND_URL}/payment-failed",
             )
 
         return Response(
