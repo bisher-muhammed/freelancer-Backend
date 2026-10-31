@@ -28,7 +28,6 @@ pillow
 drf-spectacular==0.28.0
 drf-spectacular-sidecar
 python-dotenv
-google-generativeai
 PyPDF2
 PyMuPDF
 python-docx

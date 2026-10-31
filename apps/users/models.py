@@ -52,8 +52,6 @@ class User(AbstractUser):
     email = models.EmailField(unique=True, db_index=True)
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default="client")
     created_at = models.DateTimeField(default=timezone.now)
-
-    # ✅ TIMEZONE FIELDS (THIS IS THE FIX)
     timezone = models.CharField(
         max_length=64,
         default="UTC",
