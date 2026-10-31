@@ -220,6 +220,20 @@ class FreelancerProfileSerializer(serializers.ModelSerializer):
 
     
     
+    def validate_resume(self, value):
+        if value:
+            ext = value.name.rsplit(".", 1)[-1].lower() if "." in value.name else ""
+            if ext not in ("pdf", "doc", "docx"):
+                raise serializers.ValidationError("Resume must be a PDF, DOC or DOCX file.")
+            if value.size > 5 * 1024 * 1024:
+                raise serializers.ValidationError("Resume must be 5MB or smaller.")
+        return value
+
+    def validate_hourly_rate(self, value):
+        if value is not None and value <= 0:
+            raise serializers.ValidationError("Hourly rate must be greater than zero.")
+        return value
+
     def get_skills_read(self, obj):
         """Return full skill objects with category info."""
         return FreelancerSkillSerializer(

@@ -77,9 +77,10 @@ class FreelancerBillingUnitListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        # BillingUnit.freelancer is a FreelancerProfile, not the User
         qs = BillingUnit.objects.filter(
-            freelancer=request.user
-        ).select_related("contract", "session")
+            freelancer__user=request.user
+        ).select_related("contract", "session").order_by("-created_at")
 
         return Response(
             BillingUnitListSerializer(qs, many=True).data

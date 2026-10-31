@@ -1,3 +1,5 @@
+import logging
+
 from django.conf import settings
 from rest_framework import generics,permissions,status,viewsets
 from rest_framework.response import Response
@@ -40,6 +42,18 @@ from django.db import transaction
 
 
 stripe.api_key = settings.STRIPE_SECRET_KEY
+logger = logging.getLogger(__name__)
+
+
+def _queue_meeting_email(meeting_id):
+    # The meeting is already saved; a broker outage should not turn
+    # scheduling into a 500 (and the email task itself retries).
+    try:
+        send_meeting_created_email.delay(meeting_id)
+    except Exception:
+        logger.exception("Could not queue meeting email for meeting %s", meeting_id)
+
+
 class ProjectDetailView(generics.RetrieveAPIView):
     ''''
     Retrive details of a single project including skills and client info.
@@ -224,11 +238,16 @@ class MarkChatAsReadView(APIView):
         self.check_object_permissions(request, chat)
 
         # Mark messages as read where receiver is current user
-        messages_to_mark = chat.messages.filter(is_read=False).exclude(sender=request.user)
-        messages_to_mark.update(is_read=True)
+        # (update() returns the row count; counting the queryset afterwards
+        # always gave 0 because the filter no longer matches)
+        marked = (
+            chat.messages.filter(is_read=False)
+            .exclude(sender=request.user)
+            .update(is_read=True)
+        )
 
         return Response(
-            {"detail": f"{messages_to_mark.count()} messages marked as read."},
+            {"detail": f"{marked} messages marked as read."},
             status=status.HTTP_200_OK
         )
 
@@ -262,7 +281,9 @@ class SavedProjectListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        freelancer = FreelancerProfile.objects.get(user=self.request.user)
+        freelancer = FreelancerProfile.objects.filter(user=self.request.user).first()
+        if not freelancer:
+            return SavedProject.objects.none()
 
         return (
             SavedProject.objects
@@ -332,28 +353,36 @@ class MeetingViewSet(viewsets.ModelViewSet):
                 proposal.status = "interviewing"
                 proposal.save(update_fields=["status"])
 
-            send_meeting_created_email.delay(meeting.id)
+            meeting_id = meeting.id
+            transaction.on_commit(lambda: _queue_meeting_email(meeting_id))
 
     # -------------------------
     # State transitions
     # -------------------------
+    # Model transitions raise Django ValidationError; surface them as 400
+    # instead of an unhandled 500.
+    def _transition(self, method_name):
+        meeting = self.get_object()
+        try:
+            getattr(meeting, method_name)()
+        except ValidationError as exc:
+            return Response(
+                {"detail": " ".join(exc.messages)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response({"status": meeting.status})
+
     @action(detail=True, methods=["post"])
     def mark_ongoing(self, request, pk=None):
-        meeting = self.get_object()
-        meeting.mark_ongoing()
-        return Response({"status": meeting.status})
+        return self._transition("mark_ongoing")
 
     @action(detail=True, methods=["post"])
     def mark_completed(self, request, pk=None):
-        meeting = self.get_object()
-        meeting.mark_completed()
-        return Response({"status": meeting.status})
+        return self._transition("mark_completed")
 
     @action(detail=True, methods=["post"])
     def cancel_meeting(self, request, pk=None):
-        meeting = self.get_object()
-        meeting.cancel()
-        return Response({"status": meeting.status})
+        return self._transition("cancel")
 
 
 class FreelancerProposalDetailView(generics.RetrieveAPIView):
@@ -413,14 +442,9 @@ class FreelancerOfferListView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated, IsFreelancer]
 
     def get_queryset(self):
-        freelancer_profile = FreelancerProfile.objects.get(
-            user=self.request.user
-        )
-    
-
         return (
             Offer.objects
-            .filter(freelancer=freelancer_profile)
+            .filter(freelancer__user=self.request.user)
             .select_related(
                 "proposal",
                 "client",
@@ -436,11 +460,7 @@ class FreelancerOfferDetailView(generics.RetrieveAPIView):
     lookup_field = "id"
 
     def get_queryset(self):
-        freelancer_profile = FreelancerProfile.objects.get(
-            user=self.request.user
-        )
-
-        return Offer.objects.filter(freelancer=freelancer_profile)
+        return Offer.objects.filter(freelancer__user=self.request.user)
     
 
 
@@ -464,7 +484,10 @@ class CreateEscrowCheckoutSession(APIView):
                     status=400
                 )
 
-            if offer.has_escrow:
+            # Any existing escrow (funded, settled, refunded...) blocks a new
+            # checkout: EscrowPayment is one-per-offer, so a second payment
+            # could never be recorded by the webhook.
+            if EscrowPayment.objects.filter(offer=offer).exists():
                 return Response(
                     {"detail": "Escrow already funded for this offer."},
                     status=400

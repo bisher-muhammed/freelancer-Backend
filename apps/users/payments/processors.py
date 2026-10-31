@@ -1,3 +1,6 @@
+import logging
+from decimal import Decimal, ROUND_HALF_UP
+
 from django.db import transaction
 from django.utils import timezone
 
@@ -10,23 +13,35 @@ from apps.notifications.services.activity import log_activity
 from apps.tracking.models import ActivityLog
 from apps.users.models import UserSubscription, User
 
+logger = logging.getLogger(__name__)
 
 
 class StripeEscrowProcessor:
     @transaction.atomic
-    def process(self, *, offer_id, payment_intent_id):
+    def process(self, *, offer_id, payment_intent_id, amount_total=None):
         offer = (
             Offer.objects
             .select_for_update()
             .get(id=offer_id)
         )
 
-        # 🔒 Idempotency: escrow already funded
-        if EscrowPayment.objects.filter(
-            offer=offer,
-            status="funded",
-        ).exists():
+        # 🔒 Idempotency: one escrow per offer, whatever its current status
+        # (a settled/refunded escrow must not trigger a second insert)
+        if EscrowPayment.objects.filter(offer=offer).exists():
             return
+
+        # 🔒 The escrow is booked at offer.total_budget, so the amount Stripe
+        # actually charged must match it exactly (in the smallest unit).
+        if amount_total is not None:
+            expected = int(
+                (offer.total_budget * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+            )
+            if int(amount_total) != expected:
+                logger.error(
+                    "Escrow amount mismatch for offer %s: charged %s, expected %s",
+                    offer.id, amount_total, expected,
+                )
+                return
 
         # 🔒 Idempotency: payment intent reused
         if EscrowPayment.objects.filter(
@@ -97,7 +112,7 @@ class StripeEscrowProcessor:
 class StripeSubscriptionProcessor:
 
     @transaction.atomic
-    def process(self, *, user_id, plan_id, stripe_session_id):
+    def process(self, *, user_id, plan_id, stripe_session_id, amount_total=None):
 
         # Prevent duplicate webhook processing
         if UserSubscription.objects.filter(
@@ -128,12 +143,20 @@ class StripeSubscriptionProcessor:
         if not active_subscription_exists:
             subscription.activate()
 
-        record_entry(
-            entry_type="subscription",
-            amount=plan.price,
-            user=user,
-            reference_id=str(subscription.id),
+        # Book what Stripe actually charged (the plan price may have been
+        # edited between checkout and this webhook)
+        charged = (
+            (Decimal(int(amount_total)) / 100).quantize(Decimal("0.01"))
+            if amount_total is not None
+            else plan.price
         )
+        if charged > 0:
+            record_entry(
+                entry_type="subscription",
+                amount=charged,
+                user=user,
+                reference_id=str(subscription.id),
+            )
 
         create_notifications.notify_user(
             recipient=user,

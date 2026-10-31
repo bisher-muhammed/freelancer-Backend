@@ -1,6 +1,6 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import AdminFinanceStatsView, AdminMeetingViewSet, AdminProjectDetailView, AdminProjectListView, AdminUserList, AdminSubscriptionPlanViewSet, TrackingPolicyCreateView, TrackingPolicyListView,toggle_block ,admin_get_freelancer, admin_verify_freelancer,AdminProjectScoringConfigViewSet
+from .views import AdminUserDetailView, AdminFinanceStatsView, AdminMeetingViewSet, AdminProjectDetailView, AdminProjectListView, AdminUserList, AdminSubscriptionPlanViewSet, TrackingPolicyCreateView, TrackingPolicyDeleteView, TrackingPolicyListView, TrackingPolicyUpdateView, toggle_block ,admin_get_freelancer, admin_verify_freelancer,AdminProjectScoringConfigViewSet
 
 router = DefaultRouter()
 router.register(
@@ -19,6 +19,7 @@ router.register(
 
 urlpatterns = [
     path("users/", AdminUserList.as_view(), name="admin-users"),
+    path("users/<int:pk>/", AdminUserDetailView.as_view(), name="admin-user-detail"),
     path('toggle_block/',toggle_block,name='toggle-block'),
     path('freelancers/<int:user_id>/', admin_get_freelancer, name='admin-get-freelancer'),
     path('freelancers/<int:user_id>/verify/', admin_verify_freelancer, name='admin-verify-freelancer'),
@@ -26,6 +27,9 @@ urlpatterns = [
     path("admin-projects/<int:pk>/", AdminProjectDetailView.as_view()),
     path("admin-tracking-policy/create",TrackingPolicyCreateView.as_view()),
     path("admin-tracking-policy/list",TrackingPolicyListView.as_view()),
+    # Paths match what the admin UI (app/admin/tracking-privacy) calls
+    path("admin-tracking-policy/update/<int:pk>", TrackingPolicyUpdateView.as_view()),
+    path("admin/tracking-privacy/delete/<int:pk>", TrackingPolicyDeleteView.as_view()),
     path("admin-finanas-states/", AdminFinanceStatsView.as_view(), name="admin-financial-states"),
     
 

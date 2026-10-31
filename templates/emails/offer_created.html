@@ -198,8 +198,8 @@
         <div class="offer-row">
           <span class="offer-label">Offer Status:</span>
           <span class="offer-value">
-            <span class="status-badge {{ 'status-expired' if is_expired else 'status-pending' }}">
-              {{ 'EXPIRED' if is_expired else status|upper }}
+            <span class="status-badge {% if is_expired %}status-expired{% else %}status-pending{% endif %}">
+              {% if is_expired %}EXPIRED{% else %}{{ status|upper }}{% endif %}
             </span>
           </span>
         </div>
@@ -238,8 +238,8 @@
       {% endif %}
 
       <div class="cta-section">
-        <a href="#" class="cta-button">
-          {{ 'View Expired Offer' if is_expired else 'Review & Respond to Offer' }}
+        <a href="{{ offer_url }}" class="cta-button">
+          {% if is_expired %}View Expired Offer{% else %}Review &amp; Respond to Offer{% endif %}
         </a>
         <p style="margin-top: 16px; color: #6b7280; font-size: 14px;">
           Log in to your FreelancerHub account to manage this offer.

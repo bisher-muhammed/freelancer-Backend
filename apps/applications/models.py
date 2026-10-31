@@ -553,18 +553,28 @@ class Offer(models.Model):
                     "Estimated hours exceed total escrow budget."
                 )
 
-        if self.valid_until <= timezone.now():
+        # Only new offers need a future expiry. Re-validating it on every save
+        # made any later status change of an expired offer (reject, expire)
+        # raise an unhandled ValidationError.
+        if self._state.adding and self.valid_until <= timezone.now():
             raise ValidationError("Offer expiry must be in the future.")
 
     def save(self, *args, **kwargs):
-        if self.status == 'pending' and self.valid_until <= timezone.now():
+        if (
+            not self._state.adding
+            and self.status == 'pending'
+            and self.valid_until <= timezone.now()
+        ):
             self.status = 'expired'
         self.full_clean()
         super().save(*args, **kwargs)
 
     @property
     def has_escrow(self):
-        return hasattr(self, "payment") and self.payment.status == "funded"
+        try:
+            return self.payment.status == "funded"
+        except EscrowPayment.DoesNotExist:
+            return False
 
     def __str__(self):
         return f"Offer #{self.id} → Proposal {self.proposal.id} ({self.status})"

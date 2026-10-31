@@ -69,10 +69,13 @@ class MeetingJoinTokenView(APIView):
         if not meeting_id:
             return Response({"error": "meeting_id required"}, status=400)
 
+        # "ongoing" must stay joinable: once the host marks the meeting as
+        # started, participants (and the host after a reconnect) still need
+        # tokens.
         meeting = get_object_or_404(
             Meeting.objects.select_related("chat_room", "proposal__project"),
             id=meeting_id,
-            status="scheduled"
+            status__in=("scheduled", "ongoing"),
         )
 
         # Participant check

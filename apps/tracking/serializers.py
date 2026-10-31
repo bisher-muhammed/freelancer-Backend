@@ -1,7 +1,10 @@
 from rest_framework import serializers
+from rest_framework.exceptions import NotFound
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils import timezone
 from datetime import timedelta
 from django.db import transaction
+from apps.contract.models import Contract
 from apps.tracking.services.activity_logger import log_activity
 
 from apps.billing.services import create_billing_unit_for_session
@@ -33,9 +36,46 @@ class DeviceSerializer(serializers.ModelSerializer):
 
 
 
+def get_own_open_session(context, session_id, **filters):
+    """
+    Lock and return an open session owned by the requesting user.
+    Session ids are guessable, so ownership must always be enforced.
+    """
+    user = context["request"].user
+    session = (
+        WorkSession.objects.select_for_update()
+        .filter(id=session_id, user=user, ended_at__isnull=True, **filters)
+        .first()
+    )
+    if not session:
+        raise NotFound("Active session not found.")
+    return session
+
+
 class WorkSessionStartSerializer(serializers.Serializer):
     contract_id = serializers.IntegerField()
     device_id = serializers.CharField(max_length=128)
+
+    def validate(self, attrs):
+        user = self.context["request"].user
+        freelancer = getattr(user, "freelancer_profile", None) if user.role == "freelancer" else None
+        if not freelancer:
+            raise serializers.ValidationError("Only freelancers can track time.")
+
+        contract = (
+            Contract.objects.select_related("offer")
+            .filter(id=attrs["contract_id"], offer__freelancer=freelancer)
+            .first()
+        )
+        if not contract:
+            raise serializers.ValidationError({"contract_id": "Contract not found."})
+        if contract.status != "active":
+            raise serializers.ValidationError({"contract_id": "Contract is not active."})
+        if not contract.offer.has_escrow:
+            raise serializers.ValidationError(
+                {"contract_id": "Escrow is not funded for this contract."}
+            )
+        return attrs
 
     def create(self, validated_data):
         user = self.context["request"].user
@@ -80,10 +120,7 @@ class WorkSessionPauseSerializer(serializers.Serializer):
         reason = validated_data.get("reason", "PAUSE")
 
         with transaction.atomic():
-            session = WorkSession.objects.select_for_update().get(
-                id=validated_data["session_id"],
-                ended_at__isnull=True,
-            )
+            session = get_own_open_session(self.context, validated_data["session_id"])
 
             block = session.time_blocks.filter(ended_at__isnull=True).first()
             if not block:
@@ -120,10 +157,7 @@ class WorkSessionResumeSerializer(serializers.Serializer):
 
     def create(self, validated_data):
         with transaction.atomic():
-            session = WorkSession.objects.select_for_update().get(
-                id=validated_data["session_id"],
-                ended_at__isnull=True,
-            )
+            session = get_own_open_session(self.context, validated_data["session_id"])
 
             if not session.paused_at:
                 raise serializers.ValidationError("Session is not paused")
@@ -159,10 +193,7 @@ class WorkSessionStopSerializer(serializers.Serializer):
         idle_seconds = validated_data.get("idle_seconds", 0)
 
         with transaction.atomic():
-            session = WorkSession.objects.select_for_update().get(
-                id=validated_data["session_id"],
-                ended_at__isnull=True,
-            )
+            session = get_own_open_session(self.context, validated_data["session_id"])
 
             block = session.time_blocks.filter(ended_at__isnull=True).first()
             if block:
@@ -176,8 +207,15 @@ class WorkSessionStopSerializer(serializers.Serializer):
             session.paused_at = None
             session.save(update_fields=["ended_at", "paused_at"])
 
-            # Create billing unit
-            billing_unit = create_billing_unit_for_session(session)
+            # Create billing unit. A billing problem (escrow not funded,
+            # budget exhausted) must not roll back the stop itself, otherwise
+            # the session can never be closed and blocks every new session.
+            billing_error = None
+            try:
+                billing_unit = create_billing_unit_for_session(session)
+            except DjangoValidationError as exc:
+                billing_unit = None
+                billing_error = " ".join(exc.messages)
 
             log_activity(
                 freelancer_profile=session.user.freelancer_profile,
@@ -187,9 +225,11 @@ class WorkSessionStopSerializer(serializers.Serializer):
                     "idle_seconds": idle_seconds,
                     "total_seconds": session.total_seconds,
                     "billing_unit_id": billing_unit.id if billing_unit else None,
+                    "billing_error": billing_error,
                 },
             )
 
+        session.billing_error = billing_error
         return session
 
 
@@ -272,9 +312,9 @@ class IdleFlushSerializer(serializers.Serializer):
 
     def create(self, validated_data):
         with transaction.atomic():
-            session = WorkSession.objects.select_for_update().get(
-                id=validated_data["session_id"],
-                ended_at__isnull=True,
+            session = get_own_open_session(
+                self.context,
+                validated_data["session_id"],
                 paused_at__isnull=True,
             )
 
@@ -332,9 +372,11 @@ class FreelancerScreenshotSerializer(serializers.ModelSerializer):
 
     def get_image(self, obj):
         request = self.context.get("request")
-        if obj.image:
+        if not obj.image:
+            return None
+        if request:
             return request.build_absolute_uri(obj.image.url)
-        return None
+        return obj.image.url
     class Meta:
         model = Screenshot
         fields = [

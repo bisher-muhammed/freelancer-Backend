@@ -26,10 +26,10 @@ class ProposalScoringService:
         reliability = cls._calculate_reliability(freelancer_user)
 
         final_score = (
-            skill_match * config.skill_weight +
-            experience_match * config.experience_weight +
-            budget_fit * config.budget_weight +
-            reliability * config.reliability_weight
+            float(skill_match) * config.skill_weight +
+            float(experience_match) * config.experience_weight +
+            float(budget_fit) * config.budget_weight +
+            float(reliability) * config.reliability_weight
         )
 
         # 🔎 Red flags are INFORMATION ONLY
@@ -91,9 +91,9 @@ class ProposalScoringService:
                 experience_level=project.experience_level
             )
         except ProjectScoringConfig.DoesNotExist:
-            raise RuntimeError(
-                f"No scoring config for experience level: {project.experience_level}"
-            )
+            # Fall back to the model defaults (unsaved) instead of failing the
+            # whole application with a 500 after the proposal was stored.
+            return ProjectScoringConfig(experience_level=project.experience_level)
 
     # ------------------------------------------------------------------
 
@@ -156,7 +156,8 @@ class ProposalScoringService:
             if not job.start_date:
                 continue
             end = job.end_date or today
-            total_days += (end - job.start_date).days
+            # Ignore inverted/future ranges instead of subtracting experience
+            total_days += max(0, (end - job.start_date).days)
 
         years = total_days / 365
 
@@ -179,28 +180,33 @@ class ProposalScoringService:
         Uses correct model fields:
         - fixed_budget
         - hourly_min_rate / hourly_max_rate
+
+        Within budget (bid <= limit) -> 100.
+        Over budget -> starts at 70 and loses 1 point per % over the limit.
+
+        Always returns a float: the bids/budgets are Decimals, and
+        Decimal * float (the config weights) raises TypeError.
         """
         if project.budget_type == "fixed":
             bid = proposal.bid_fixed_price
-            budget = project.fixed_budget
-
-            if bid <= budget:
-                return 100 if bid < budget else 70
-
-            diff_percent = ((bid - budget) / budget) * 100
-            return max(0, 70 - diff_percent)
-
-        if project.budget_type == "hourly":
+            limit = project.fixed_budget
+        elif project.budget_type == "hourly":
             bid = proposal.bid_hourly_rate
-            max_rate = project.hourly_max_rate
+            limit = project.hourly_max_rate
+        else:
+            return 50.0
 
-            if bid <= max_rate:
-                return 100 if bid < max_rate else 70
+        if bid is None or not limit or limit <= 0:
+            return 50.0
 
-            diff_percent = ((bid - max_rate) / max_rate) * 100
-            return max(0, 70 - diff_percent)
+        bid = float(bid)
+        limit = float(limit)
 
-        return 50.0
+        if bid <= limit:
+            return 100.0
+
+        diff_percent = ((bid - limit) / limit) * 100
+        return max(0.0, 70.0 - diff_percent)
 
     # ------------------------------------------------------------------
 
