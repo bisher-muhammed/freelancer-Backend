@@ -93,7 +93,12 @@ def send_meeting_created_email(self, meeting_id):
                 "timezone_name": tz_name,
                 "freelancer_name": freelancer_user.get_full_name() or freelancer_user.username,
                 "client_name": client_user.get_full_name() or client_user.username,
-                "portal_url": f"{settings.SITE_URL}/meetings/{meeting.id}/",
+                # Link to the web app's meetings page for this user's role
+                # (SITE_URL is the API host and has no meetings page)
+                "portal_url": (
+                    f"{settings.FRONTEND_URL}/"
+                    f"{'freelancer' if user_obj.role == 'freelancer' else 'client'}/meetings"
+                ),
             }
 
             # 4️⃣ Subject line with local time
@@ -140,14 +145,15 @@ def send_offer_created_email(self, offer_id):
                 "proposal",
                 "proposal__project",
                 "client",
-                "freelancer",
+                "freelancer__user",
             )
             .get(id=offer_id)
         )
     except Offer.DoesNotExist:
         return
 
-    freelancer = offer.freelancer
+    # Offer.freelancer is the FreelancerProfile; the person is its user
+    freelancer = offer.freelancer.user
     client = offer.client
     project = offer.proposal.project
 
@@ -157,27 +163,40 @@ def send_offer_created_email(self, offer_id):
         or getattr(freelancer, "timezone", None)
         or settings.TIME_ZONE
     )
-    user_tz = ZoneInfo(tz_name)
+    try:
+        user_tz = ZoneInfo(tz_name)
+    except Exception:
+        tz_name = settings.TIME_ZONE
+        user_tz = ZoneInfo(tz_name)
 
+    fmt = "%d %b %Y, %I:%M %p"
     valid_until_local = (
         localtime(offer.valid_until, user_tz)
         if offer.valid_until else None
     )
+    is_expired = bool(offer.valid_until and offer.valid_until < timezone.now())
 
-    # 2️⃣ Email context (NO URL)
+    # Offers carry an escrow total plus an agreed hourly rate
+    # (the old rate_type / fixed_rate / hourly_rate fields no longer exist)
     context = {
         "freelancer_name": freelancer.get_full_name() or freelancer.username,
+        "freelancer_email": freelancer.email,
         "client_name": client.get_full_name() or client.username,
         "project_title": project.title,
-        "rate_type": offer.rate_type.capitalize(),
-        "rate": (
-            offer.fixed_rate
-            if offer.rate_type == "fixed"
-            else offer.hourly_rate
+        "project_type": project.get_budget_type_display(),
+        "rate_type": "hourly",
+        "rate_display": (
+            f"₹{offer.agreed_hourly_rate}/hr · escrow ₹{offer.total_budget}"
         ),
-        "valid_until": valid_until_local,
-        "timezone_name": tz_name,
+        "status": offer.status,
+        "is_expired": is_expired,
+        "can_respond": offer.status == "pending" and not is_expired,
+        "created_at_display": localtime(offer.created_at, user_tz).strftime(fmt),
+        "valid_until_display": (
+            f"{valid_until_local.strftime(fmt)} ({tz_name})" if valid_until_local else None
+        ),
         "message": offer.message,
+        "offer_url": f"{settings.FRONTEND_URL}/freelancer/offers-list/{offer.id}",
     }
 
     subject = f"New Offer Received · {project.title}"

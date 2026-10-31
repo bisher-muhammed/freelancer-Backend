@@ -1,6 +1,10 @@
+import logging
+
 from channels.middleware import BaseMiddleware
 from django.db import close_old_connections
 from channels.db import database_sync_to_async
+
+logger = logging.getLogger(__name__)
 
 
 class JWTAuthMiddleware(BaseMiddleware):
@@ -14,7 +18,7 @@ class JWTAuthMiddleware(BaseMiddleware):
 
         User = get_user_model()
 
-        close_old_connections()
+        await database_sync_to_async(close_old_connections)()
 
         scope["user"] = AnonymousUser()
 
@@ -41,19 +45,15 @@ class JWTAuthMiddleware(BaseMiddleware):
                 access_token = AccessToken(token)
 
                 user = await database_sync_to_async(
-                    User.objects.get
-                )(id=access_token["user_id"])
+                    User.objects.filter(id=access_token["user_id"], is_active=True).first
+                )()
 
-                scope["user"] = user
-
-                print("✅ WebSocket authenticated:", user)
-
-            else:
-
-                print("❌ No access cookie found")
+                if user is not None:
+                    scope["user"] = user
 
         except Exception as e:
 
-            print("❌ WebSocket auth error:", e)
+            # Invalid/expired token: stay anonymous; consumers reject the socket
+            logger.debug("WebSocket auth failed: %s", e)
 
         return await super().__call__(scope, receive, send)

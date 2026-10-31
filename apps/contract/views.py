@@ -1,5 +1,6 @@
-from amqp import NotFound
+from rest_framework.exceptions import NotFound
 from django.core.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import ValidationError as DRFValidationError
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import generics, permissions, status
@@ -12,9 +13,9 @@ from apps.applications.serializers import MessageSerializer
 from apps.applications.models import EscrowPayment, Message
 from apps.billing.payouts import EscrowRefundProcessor
 from apps.contract.permissions import IsClient, IsContractParty
-from apps.contract.serializers import AcceptTrackingPolicySerializer, AdminTerminationRequestSerializer, ContractDocumentSerializer, ContractReviewCreateSerializer, ContractReviewListSerializer, ContractSerializer, ContractDocumentFolderSerializer, TrackingPolicySerializer
+from apps.contract.serializers import admin_contract_summary, AcceptTrackingPolicySerializer, AdminTerminationRequestSerializer, ContractDocumentSerializer, ContractReviewCreateSerializer, ContractReviewListSerializer, ContractSerializer, ContractDocumentFolderSerializer, TrackingPolicySerializer
 from apps.contract.models import Contract, ContractDocument, ContractDocumentFolder, ContractReview, TerminationRequest
-from apps.contract.services.termination import settle_contract, terminate_contract
+from apps.contract.services.termination import complete_contract, settle_contract, terminate_contract
 
 
 
@@ -101,9 +102,15 @@ class ContractMessageView(APIView):
 
         return contract
 
+    def get_chat_room(self, contract):
+        chat_room = getattr(contract.offer.proposal, "chat_room", None)
+        if chat_room is None:
+            raise NotFound("No chat room exists for this contract.")
+        return chat_room
+
     def get(self, request, contract_id):
         contract = self.get_contract(request.user, contract_id)
-        chat_room = contract.offer.proposal.chat_room
+        chat_room = self.get_chat_room(contract)
 
         messages = Message.objects.filter(chat_room=chat_room)
         serializer = MessageSerializer(messages, many=True)
@@ -111,7 +118,7 @@ class ContractMessageView(APIView):
 
     def post(self, request, contract_id):
         contract = self.get_contract(request.user, contract_id)
-        chat_room = contract.offer.proposal.chat_room
+        chat_room = self.get_chat_room(contract)
 
         serializer = MessageSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -242,7 +249,11 @@ class ContractDocumentFolderView(APIView):
 
     def post(self, request, contract_id):
         contract = get_object_or_404(Contract, id=contract_id)
-        name = request.data.get("name")
+
+        if request.user not in [contract.get_client(), contract.get_freelancer_user()]:
+            raise PermissionDenied("Not allowed")
+
+        name = (request.data.get("name") or "").strip()
         if not name:
             return Response(
                 {"detail": "Folder name required"},
@@ -333,7 +344,10 @@ class ContractTerminateRequestView(APIView):
     permission_classes = [IsAuthenticated, IsClient]
 
     def post(self, request, pk):
-        contract = get_object_or_404(Contract, pk=pk)
+        # Only the client who owns the contract may request termination.
+        # (IsClient is an object permission, so it is not applied to a
+        # plain APIView.post — the queryset filter enforces ownership.)
+        contract = get_object_or_404(Contract, pk=pk, offer__client=request.user)
 
         if contract.status != "active":
             return Response(
@@ -341,23 +355,61 @@ class ContractTerminateRequestView(APIView):
                 status=400
             )
 
-        if hasattr(contract, "termination_request"):
+        existing = getattr(contract, "termination_request", None)
+        if existing and existing.status != "rejected":
             return Response(
                 {"detail": "Termination already requested"},
                 status=400
             )
 
         with transaction.atomic():
-            TerminationRequest.objects.create(
-                contract=contract,
-                requested_by=request.user,
-                reason=request.data.get("reason", "")
-            )
+            if existing:
+                # A previously rejected request may be re-submitted
+                existing.status = "pending"
+                existing.requested_by = request.user
+                existing.reason = request.data.get("reason", "")
+                existing.reviewed_by = None
+                existing.reviewed_at = None
+                existing.save()
+            else:
+                TerminationRequest.objects.create(
+                    contract=contract,
+                    requested_by=request.user,
+                    reason=request.data.get("reason", "")
+                )
 
         return Response(
             {"detail": "Termination request submitted"},
             status=201
         )
+
+class ContractCompleteView(APIView):
+    """
+    Client confirms the work is done and ends the contract normally.
+    Unused escrow is settled/refunded by an admin afterwards.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        contract = get_object_or_404(Contract, pk=pk, offer__client=request.user)
+
+        try:
+            contract = complete_contract(contract=contract, actor=request.user)
+        except DRFValidationError as exc:
+            return Response({"detail": _first_error(exc)}, status=400)
+
+        return Response(
+            ContractSerializer(contract, context={"request": request}).data,
+            status=200,
+        )
+
+
+def _first_error(exc):
+    detail = exc.detail
+    if isinstance(detail, list) and detail:
+        return str(detail[0])
+    return str(detail)
+
 
 class AdminApproveTerminationView(APIView):
     permission_classes = [IsAuthenticated, IsAdminUser]
@@ -375,12 +427,29 @@ class AdminApproveTerminationView(APIView):
             tr.reviewed_at = timezone.now()
             tr.save()
 
+            # Raises DRF ValidationError (400) if the contract is not active,
+            # rolling back the approval above.
             terminate_contract(
                 contract=tr.contract,
                 actor=request.user
             )
 
         return Response({"detail": "Contract terminated"}, status=200)
+
+
+class AdminRejectTerminationView(APIView):
+    """Admin declines a pending termination request; contract stays active."""
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request, pk):
+        tr = get_object_or_404(TerminationRequest, pk=pk, status="pending")
+
+        tr.status = "rejected"
+        tr.reviewed_by = request.user
+        tr.reviewed_at = timezone.now()
+        tr.save(update_fields=["status", "reviewed_by", "reviewed_at"])
+
+        return Response({"detail": "Termination request rejected"}, status=200)
 
 
 
@@ -470,12 +539,44 @@ class AdminTerminationRequestListView(APIView):
                 "contract__offer__freelancer__user",
                 "requested_by",
             )
-            .filter(status__in=["pending", "approved"])
+            # "rejected" too: the admin page has a Rejected filter tab
+            .filter(status__in=["pending", "approved", "rejected"])
             .order_by("-created_at")
         )
 
         serializer = AdminTerminationRequestSerializer(qs, many=True)
         return Response(serializer.data, status=200)
+
+
+class AdminCompletedContractListView(APIView):
+    """
+    Normally completed contracts whose escrow still needs settling or
+    refunding (terminated ones are handled via termination requests).
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        contracts = (
+            Contract.objects
+            .select_related(
+                "offer__client",
+                "offer__payment",
+                "offer__freelancer__user",
+                "offer__proposal__project",
+            )
+            .filter(
+                status="ended",
+                end_reason="completed",
+                offer__payment__status__in=["funded", "settled", "refund_processing"],
+            )
+            # Settled with nothing left to refund -> nothing more to do
+            .exclude(
+                offer__payment__status="settled",
+                offer__payment__refundable_amount__lte=0,
+            )
+            .order_by("-ended_at")
+        )
+        return Response([admin_contract_summary(c) for c in contracts], status=200)
     
 
 class ContractReviewCreateView(generics.CreateAPIView):
@@ -505,8 +606,7 @@ class FreelancerTestimonialListView(generics.ListAPIView):
                 "contract",
                 "contract__offer",
                 "contract__offer__client",
-                "contract__offer__freelancer",
-                "contract__offer__freelancer__freelancer_profile",
+                "contract__offer__freelancer__user",
             )
             .order_by("-created_at")
         )

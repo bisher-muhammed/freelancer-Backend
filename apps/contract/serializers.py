@@ -84,8 +84,8 @@ class EscrowPaymentSerializer(serializers.ModelSerializer):
 
 
 class ContractSerializer(serializers.ModelSerializer):
-    # Basic references
-    freelancer_name = serializers.CharField(source="offer.freelancer.username", read_only=True)
+    # Basic references (offer.freelancer is a FreelancerProfile, not a User)
+    freelancer_name = serializers.CharField(source="offer.freelancer.user.username", read_only=True)
     client_name = serializers.CharField(source="offer.client.username", read_only=True)
     project_title = serializers.CharField(source="offer.proposal.project.title", read_only=True)
 
@@ -101,6 +101,10 @@ class ContractSerializer(serializers.ModelSerializer):
     policy_accepted = serializers.SerializerMethodField()
     chat_room_id = serializers.SerializerMethodField()
     current_user_id = serializers.SerializerMethodField()
+
+    # Used by the client contract page (termination banner / review button)
+    termination_request = serializers.SerializerMethodField()
+    has_review = serializers.SerializerMethodField()
 
     class Meta:
         model = Contract
@@ -139,6 +143,10 @@ class ContractSerializer(serializers.ModelSerializer):
             # Chat
             "chat_room_id",
             "current_user_id",
+
+            # Lifecycle
+            "termination_request",
+            "has_review",
 
             # Timestamps
             "created_at",
@@ -187,6 +195,21 @@ class ContractSerializer(serializers.ModelSerializer):
     def get_current_user_id(self, obj):
         request = self.context.get("request")
         return request.user.id if request else None
+
+    def get_termination_request(self, obj):
+        tr = TerminationRequest.objects.filter(contract=obj).first()
+        if not tr:
+            return None
+        return {
+            "id": tr.id,
+            "status": tr.status,
+            "reason": tr.reason,
+            "created_at": tr.created_at,
+            "reviewed_at": tr.reviewed_at,
+        }
+
+    def get_has_review(self, obj):
+        return ContractReview.objects.filter(contract=obj).exists()
 
     
 
@@ -380,42 +403,49 @@ class AdminTerminationRequestSerializer(serializers.ModelSerializer):
         }
 
     def get_contract(self, obj):
-        contract = obj.contract
-        offer = contract.offer
+        return admin_contract_summary(obj.contract)
 
-        payment_data = None
 
-        if hasattr(offer, "payment"):
-            payment_data = EscrowPaymentSerializer(
-                offer.payment
-            ).data
+def admin_contract_summary(contract):
+    """Contract + escrow shape used by the admin settlement screens."""
+    offer = contract.offer
 
-        return {
-            "id": contract.id,
-            "status": contract.status,
-            "scope_summary": contract.scope_summary,
-            "termination_notice_days": contract.termination_notice_days,
-            "started_at": contract.started_at,
+    payment_data = None
 
-            "offer": {
-                "id": offer.id,
-                "total_budget": offer.total_budget,
-                "payment": payment_data,   # ← THIS IS THE IMPORTANT PART
-            },
+    if hasattr(offer, "payment"):
+        payment_data = EscrowPaymentSerializer(
+            offer.payment
+        ).data
 
-            "client": {
-                "id": offer.client.id,
-                "name": offer.client.get_full_name() or offer.client.email,
-            },
+    return {
+        "id": contract.id,
+        "status": contract.status,
+        "end_reason": contract.end_reason,
+        "ended_at": contract.ended_at,
+        "project_title": offer.proposal.project.title,
+        "scope_summary": contract.scope_summary,
+        "termination_notice_days": contract.termination_notice_days,
+        "started_at": contract.started_at,
 
-            "freelancer": {
-                "id": offer.freelancer.user.id,
-                "name": (
-                    offer.freelancer.user.get_full_name()
-                    or offer.freelancer.user.email
-                ),
-            },
-        }
+        "offer": {
+            "id": offer.id,
+            "total_budget": offer.total_budget,
+            "payment": payment_data,   # ← THIS IS THE IMPORTANT PART
+        },
+
+        "client": {
+            "id": offer.client.id,
+            "name": offer.client.get_full_name() or offer.client.email,
+        },
+
+        "freelancer": {
+            "id": offer.freelancer.user.id,
+            "name": (
+                offer.freelancer.user.get_full_name()
+                or offer.freelancer.user.email
+            ),
+        },
+    }
 
     
 
@@ -457,27 +487,9 @@ class ContractReviewCreateSerializer(serializers.ModelSerializer):
 
     @transaction.atomic
     def create(self, validated_data):
-        review = super().create(validated_data)
-
-        freelancer_profile = (
-            review.contract.offer.freelancer.freelancer_profile
-        )
-
-        # Recalculate aggregate rating (single source of truth)
-        qs = ContractReview.objects.filter(
-            contract__offer__freelancer=review.contract.offer.freelancer
-        )
-
-        freelancer_profile.total_reviews = qs.count()
-        freelancer_profile.average_rating = (
-            qs.aggregate(avg=Avg("freelancer_rating"))["avg"] or 0
-        )
-
-        freelancer_profile.save(
-            update_fields=["total_reviews", "average_rating"]
-        )
-
-        return review
+        # The post_save signal (apps.contract.signals) recalculates the
+        # freelancer's average_rating / total_reviews atomically with this.
+        return super().create(validated_data)
 
 
 

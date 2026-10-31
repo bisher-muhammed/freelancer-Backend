@@ -119,6 +119,7 @@ class StopSessionView(APIView):
                 "session_id": session.id,
                 "total_seconds": session.total_seconds,
                 "ended_at": session.ended_at,
+                "billing_error": getattr(session, "billing_error", None),
             },
             status=status.HTTP_200_OK,
         )
@@ -156,8 +157,14 @@ class DeviceCheckOrCreateView(generics.GenericAPIView):
 
     def post(self, request):
         data = request.data
+        device_id = str(data.get("device_id") or "").strip()
+        if not device_id:
+            return Response(
+                {"device_id": "This field is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         device, created = Device.objects.get_or_create(
-            device_id=data["device_id"],
+            device_id=device_id[:255],
             freelancer=request.user,
             defaults={
                 "device_name": data.get("device_name", ""),
@@ -252,8 +259,15 @@ class AdminWorkSessionListView(APIView):
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def get(self, request):
-        sessions = WorkSession.objects.all().order_by("-started_at")
-        serializer = WorkSessionDetailSerializer(sessions, many=True)
+        sessions = (
+            WorkSession.objects.all()
+            .prefetch_related("time_blocks__windows__screenshots")
+            .order_by("-started_at")
+        )
+        # request context is required to build absolute screenshot URLs
+        serializer = WorkSessionDetailSerializer(
+            sessions, many=True, context={"request": request}
+        )
         return Response(serializer.data)
 
 
@@ -307,7 +321,7 @@ class TimeBlockExplanationCreateView(APIView):
 
             if flagged is not None:
                 queryset = queryset.filter(
-                    flag=str(flagged).lower() in ("true", "1", "yes")
+                    block__is_flagged=str(flagged).lower() in ("true", "1", "yes")
                 )
 
             if freelancer_id:
@@ -317,7 +331,8 @@ class TimeBlockExplanationCreateView(APIView):
         # FREELANCER ACCESS
         # ----------------------------
         else:
-            queryset = queryset.filter(freelancer__user=user)
+            # TimeBlockExplanation.freelancer is the User itself
+            queryset = queryset.filter(freelancer=user)
 
         serializer = TimeBlockExplanationReviewSerializer(
             queryset.order_by("-created_at"),
@@ -377,7 +392,9 @@ class FreelancerActivityLogView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        freelancer = request.user.freelancer_profile
+        freelancer = getattr(request.user, "freelancer_profile", None)
+        if freelancer is None:
+            return Response([])
 
         qs = ActivityLog.objects.filter(
             freelancer=freelancer

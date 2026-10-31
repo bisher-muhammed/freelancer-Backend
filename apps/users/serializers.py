@@ -10,7 +10,12 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from apps.contract.models import Contract
 from apps.notifications.models import ActivityLog
 
-from .utils import create_and_send_otp, verify_otp
+from .utils import (
+    consume_password_reset_token,
+    create_and_send_otp,
+    issue_password_reset_token,
+    verify_otp,
+)
 from .models import ClientProfile, Project, UserSubscription
 from apps.freelancer.models import Skill
 from apps.freelancer.serializers import FreelancerProfileSerializer
@@ -80,10 +85,19 @@ class RegisterFormSerializer(serializers.Serializer):
 
 class VerifyOTPSerializer(serializers.Serializer):
     email = serializers.EmailField()
-    username = serializers.CharField()
+    username = serializers.CharField(max_length=150)
     role = serializers.ChoiceField(choices=["client", "freelancer"])
-    password = serializers.CharField(write_only=True)
+    # Same rules as RegisterFormSerializer: this is the step that actually
+    # creates the user, so it must not accept weaker passwords.
+    password = serializers.CharField(
+        write_only=True,
+        min_length=8,
+        validators=[validate_strong_password],
+    )
     otp = serializers.CharField(write_only=True)
+
+    def validate_email(self, value):
+        return value.lower().strip()
 
     def validate(self, data):
         email = data["email"]
@@ -202,11 +216,16 @@ class VerifyPasswordResetOTPSerializer(serializers.Serializer):
 
         if not verify_otp(email, otp, purpose="password_reset"):
             raise serializers.ValidationError({"otp": "Invalid or expired OTP."})
+
+        # Hand back a single-use token; reset-password requires it, so a
+        # password can only be changed after this OTP check succeeded.
+        data["reset_token"] = issue_password_reset_token(email)
         return data
 
 
 class ResetPasswordSerializer(serializers.Serializer):
     email = serializers.EmailField()
+    reset_token = serializers.CharField(write_only=True)
     new_password = serializers.CharField(
         write_only=True,
         min_length=8,
@@ -225,6 +244,10 @@ class ResetPasswordSerializer(serializers.Serializer):
     def validate(self, data):
         if data["new_password"] != data["confirm_new_password"]:
             raise serializers.ValidationError({"confirm_new_password": "Passwords do not match."})
+        if not consume_password_reset_token(data["email"], data["reset_token"]):
+            raise serializers.ValidationError(
+                {"reset_token": "Reset session expired. Please verify the OTP again."}
+            )
         return data
 
     def create(self, validated_data):
@@ -274,14 +297,12 @@ class ClientProfileSerializer(serializers.ModelSerializer):
         ]
     )
 
+    # Declared fields ignore Meta.read_only_fields, so read_only must be set
+    # here: ratings come from reviews, never from the client themselves.
     rating = serializers.DecimalField(
         max_digits=3,
         decimal_places=2,
-        required=False,
-        validators=[
-            MinValueValidator(0),
-            MaxValueValidator(5)
-        ]
+        read_only=True,
     )
 
     country = serializers.CharField(
@@ -367,9 +388,7 @@ class ClientProfileSerializer(serializers.ModelSerializer):
             setattr(instance, attr, value)
 
         instance.save()
-        print("✅ Client profile updated successfully.")
 
-        # Test realtime notification
         notify_user(
             recipient=instance.user,
             notif_type="PROFILE_UPDATED",
@@ -377,8 +396,7 @@ class ClientProfileSerializer(serializers.ModelSerializer):
             message="Your profile information was updated successfully.",
             data={"user_id": instance.id}
         )
-        print("✅ Notification sent for profile update.")
-        
+
 
         return instance
 
@@ -477,19 +495,31 @@ class ProjectSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
 
-        budget_type = attrs.get("budget_type")
+        # On partial updates fall back to the stored values so a PATCH of a
+        # single field cannot leave the budget in an inconsistent state.
+        def current(field):
+            if field in attrs:
+                return attrs[field]
+            return getattr(self.instance, field, None)
 
-        fixed_budget = attrs.get("fixed_budget")
+        budget_type = current("budget_type")
 
-        hourly_min = attrs.get("hourly_min_rate")
+        fixed_budget = current("fixed_budget")
 
-        hourly_max = attrs.get("hourly_max_rate")
+        hourly_min = current("hourly_min_rate")
+
+        hourly_max = current("hourly_max_rate")
 
         if budget_type == "fixed":
 
             if fixed_budget is None:
                 raise serializers.ValidationError(
                     "Fixed budget amount is required."
+                )
+
+            if fixed_budget <= 0:
+                raise serializers.ValidationError(
+                    "Fixed budget must be greater than zero."
                 )
 
         if budget_type == "hourly":
@@ -680,6 +710,21 @@ class ProjectSerializer(serializers.ModelSerializer):
         instance.save()
 
         return instance
+
+
+class PublicClientSerializer(serializers.ModelSerializer):
+    """Client identity shown to freelancers browsing jobs (no email/timezone)."""
+
+    class Meta:
+        model = User
+        fields = ["id", "username"]
+        read_only_fields = fields
+
+
+class PublicProjectSerializer(ProjectSerializer):
+    """Read-only project listing for freelancers; hides the client's email."""
+
+    client = PublicClientSerializer(read_only=True)
 
 
 class ProjectMiniSerializer(serializers.ModelSerializer):

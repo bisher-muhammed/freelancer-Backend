@@ -51,6 +51,41 @@ class BillingUnitListSerializer(serializers.ModelSerializer):
 class BillingUnitReviewSerializer(serializers.Serializer):
     action = serializers.ChoiceField(choices=["approve", "reject"])
 
+    # Units that are locked in a payout batch or already paid are final.
+    # Re-approving a paid unit would make it eligible for a second payout.
+    REVIEWABLE_STATUSES = ("pending", "approved", "rejected")
+
+    def validate(self, attrs):
+        if self.instance is not None and self.instance.status not in self.REVIEWABLE_STATUSES:
+            raise serializers.ValidationError(
+                f"Billing unit is '{self.instance.status}' and can no longer be reviewed."
+            )
+        escrow = getattr(self.instance.contract.offer, "payment", None) if self.instance else None
+        if escrow is not None and escrow.status != "funded":
+            # Settlement fixed released/refundable amounts from the reviews;
+            # changing a review now would pay out refunded money or vice versa.
+            raise serializers.ValidationError(
+                "This contract's escrow is already settled; billing reviews are final."
+            )
+        if (
+            self.instance is not None
+            and attrs["action"] == "approve"
+            and self.instance.status != "approved"
+        ):
+            offer = self.instance.contract.offer
+            approved_total = (
+                BillingUnit.objects.filter(
+                    contract=self.instance.contract,
+                    status__in=["approved", "locked", "paid"],
+                ).aggregate(total=Sum("gross_amount"))["total"]
+                or Decimal("0.00")
+            )
+            if approved_total + self.instance.gross_amount > offer.total_budget:
+                raise serializers.ValidationError(
+                    "Approving this unit would exceed the contract's escrow budget."
+                )
+        return attrs
+
     def update(self, instance, validated_data):
         instance.status = (
             "approved" if validated_data["action"] == "approve" else "rejected"
@@ -207,7 +242,8 @@ from rest_framework import serializers
 
 class InvoiceSerializer(serializers.ModelSerializer):
     freelancer_name = serializers.SerializerMethodField()
-    payout_batch_id = serializers.UUIDField(
+    # PayoutBatch uses an integer primary key (only Invoice ids are UUIDs)
+    payout_batch_id = serializers.IntegerField(
         source="payout_batch.id", read_only=True
     )
 

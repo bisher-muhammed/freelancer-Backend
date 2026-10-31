@@ -4,7 +4,7 @@ from rest_framework import status, permissions
 from rest_framework.views import APIView
 from rest_framework import viewsets, generics
 from rest_framework.permissions import IsAdminUser
-from django.db.models import Sum
+from django.db.models import ProtectedError, Sum
 from datetime import timedelta
 from django.utils.timezone import now
 
@@ -18,8 +18,9 @@ from django.contrib.auth import get_user_model
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django_filters.rest_framework import DjangoFilterBackend
 from .models import SubscriptionPlan, TrackingPolicy
-from rest_framework.decorators import api_view
-from django.core.exceptions import ValidationError
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.exceptions import ValidationError
+from django.shortcuts import get_object_or_404
 from apps.users.serializers import AdminUserSerializer
 from .serializers import AdminLoginSerializer
 from apps.freelancer.models import FreelancerProfile
@@ -31,6 +32,8 @@ User = get_user_model()
 
 
 class AdminLoginView(APIView):
+    permission_classes = [permissions.AllowAny]
+
     def post(self, request):
         serializer = AdminLoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -76,6 +79,34 @@ class AdminUserList(ListAPIView):
 
 
 
+def _destroy_unless_protected(instance, protected_message):
+    try:
+        instance.delete()
+    except ProtectedError:
+        return Response({"detail": protected_message}, status=status.HTTP_400_BAD_REQUEST)
+    return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class AdminUserDetailView(generics.RetrieveDestroyAPIView):
+    """Admin view / delete of a single user (used by the admin UI)."""
+    serializer_class = AdminUserSerializer
+    permission_classes = [IsAdminUser]
+    queryset = User.objects.all()
+
+    def destroy(self, request, *args, **kwargs):
+        user = self.get_object()
+        if user.pk == request.user.pk:
+            return Response({"detail": "You cannot delete your own account."}, status=400)
+        if user.is_superuser:
+            return Response({"detail": "Superusers cannot be deleted here."}, status=400)
+        # Users with contracts / billing / payout history are PROTECTed by
+        # those records; block them instead of deleting financial history.
+        return _destroy_unless_protected(
+            user,
+            "This user has contract or payment history and cannot be deleted. Block the account instead.",
+        )
+
+
 class AdminSubscriptionPlanViewSet(viewsets.ModelViewSet):
     queryset = SubscriptionPlan.objects.all()
     serializer_class = SubscriptionPlanSerializer
@@ -84,6 +115,7 @@ class AdminSubscriptionPlanViewSet(viewsets.ModelViewSet):
 
 
 @api_view(['POST'])
+@permission_classes([IsAdminUser])
 def toggle_block(request):
     user_id = request.data.get("user_id")
     if not user_id:
@@ -91,8 +123,11 @@ def toggle_block(request):
 
     try:
         user = User.objects.get(id=user_id)
-    except User.DoesNotExist:
+    except (User.DoesNotExist, ValueError, TypeError):
         return Response({"error": "User not found"}, status=404)
+
+    if user.pk == request.user.pk:
+        return Response({"error": "You cannot block your own account"}, status=400)
 
     # Flip the current state
     user.is_active = not user.is_active
@@ -109,16 +144,18 @@ def toggle_block(request):
 
 
 @api_view(['GET'])
+@permission_classes([IsAdminUser])
 def admin_get_freelancer(request, user_id):
-    profile = FreelancerProfile.objects.get(user__id=user_id)
-    serializer = FreelancerProfileSerializer(profile)
+    profile = get_object_or_404(FreelancerProfile, user__id=user_id)
+    serializer = FreelancerProfileSerializer(profile, context={"request": request})
     return Response(serializer.data)
 
-                     
+
 
 @api_view(['POST'])
+@permission_classes([IsAdminUser])
 def admin_verify_freelancer(request,user_id):
-    profile = FreelancerProfile.objects.get(user__id=user_id)
+    profile = get_object_or_404(FreelancerProfile, user__id=user_id)
 
     if profile.is_verified:
         return Response({"details":"Already verified"},status=400)
@@ -151,14 +188,11 @@ class AdminProjectScoringConfigViewSet(viewsets.ModelViewSet):
         if ProjectScoringConfig.objects.filter(experience_level=level).exists():
             raise ValidationError(f"Scoring configuration already exists for {level} level.")
 
-        instance = serializer.save()
-        instance.full_clean()
-        instance.save()
+        # ProjectScoringConfig.save() already runs full_clean()
+        serializer.save()
 
     def perform_update(self, serializer):
-        instance = serializer.save()
-        instance.full_clean()
-        instance.save()
+        serializer.save()
 
 
 
@@ -192,13 +226,13 @@ class AdminMeetingViewSet(viewsets.ReadOnlyModelViewSet):
     ]
 
     search_fields = [
-        "project__title",
+        "proposal__project__title",
         "chat_room__client__email",
         "chat_room__freelancer__email",
     ]
 
     ordering_fields = [
-        "scheduled_at",
+        "start_time",
         "created_at",
         "status",
     ]
@@ -223,9 +257,15 @@ class AdminProjectListView(generics.ListAPIView):
             .prefetch_related("skills_required")
         )
 
-class AdminProjectDetailView(generics.RetrieveAPIView):
+class AdminProjectDetailView(generics.RetrieveDestroyAPIView):
     serializer_class = AdminProjectDetailSerializer
     permission_classes = [IsAdminUser]
+
+    def destroy(self, request, *args, **kwargs):
+        return _destroy_unless_protected(
+            self.get_object(),
+            "This project has a contract and cannot be deleted.",
+        )
 
     def get_queryset(self):
         return (
@@ -247,6 +287,29 @@ class TrackingPolicyListView(generics.ListAPIView):
 
     def get_queryset(self):
         return TrackingPolicy.objects.all().order_by("-created_at")
+
+
+class TrackingPolicyUpdateView(generics.UpdateAPIView):
+    serializer_class = TrackingPolicySerializer
+    permission_classes = [IsAdminUser]
+    queryset = TrackingPolicy.objects.all()
+
+
+class TrackingPolicyDeleteView(generics.DestroyAPIView):
+    permission_classes = [IsAdminUser]
+    queryset = TrackingPolicy.objects.all()
+
+    def destroy(self, request, *args, **kwargs):
+        policy = self.get_object()
+        try:
+            policy.delete()
+        except ProtectedError:
+            # Contracts reference accepted policies (on_delete=PROTECT)
+            return Response(
+                {"detail": "This policy has been accepted on contracts. Deactivate it instead."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 

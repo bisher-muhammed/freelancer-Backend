@@ -1,7 +1,7 @@
 import logging
+from zoneinfo import ZoneInfo
 from rest_framework_simplejwt.exceptions import TokenError
 import stripe
-import traceback
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db.models import OuterRef, Subquery, FloatField, BooleanField
@@ -55,6 +55,45 @@ from django.db.models import (
 User = get_user_model()
 stripe.api_key = settings.STRIPE_SECRET_KEY
 logger = logging.getLogger(__name__)
+
+ACCESS_COOKIE_MAX_AGE = 60 * 60
+REFRESH_COOKIE_MAX_AGE = 30 * 24 * 60 * 60
+
+
+def set_access_cookie(response, access_token):
+    response.set_cookie(
+        key="access_token",
+        value=access_token,
+        httponly=True,
+        secure=settings.AUTH_COOKIE_SECURE,
+        samesite=settings.AUTH_COOKIE_SAMESITE,
+        max_age=ACCESS_COOKIE_MAX_AGE,
+    )
+
+
+def set_auth_cookies(response, refresh):
+    set_access_cookie(response, str(refresh.access_token))
+    response.set_cookie(
+        key="refresh_token",
+        value=str(refresh),
+        httponly=True,
+        secure=settings.AUTH_COOKIE_SECURE,
+        samesite=settings.AUTH_COOKIE_SAMESITE,
+        max_age=REFRESH_COOKIE_MAX_AGE,
+    )
+
+
+def update_detected_timezone(user, tz_name):
+    if not tz_name:
+        return
+    try:
+        ZoneInfo(tz_name)
+    except Exception:
+        return
+    user.last_detected_timezone = tz_name
+    if not user.timezone:
+        user.timezone = tz_name
+    user.save(update_fields=["timezone", "last_detected_timezone"])
 
 
 class SendOTPView(generics.GenericAPIView):
@@ -136,10 +175,6 @@ class LoginView(generics.GenericAPIView):
 
         refresh = RefreshToken.for_user(user)
 
-        access_token = str(refresh.access_token)
-
-        refresh_token = str(refresh)
-
         response = Response(
             {
                 "success": True,
@@ -155,23 +190,7 @@ class LoginView(generics.GenericAPIView):
             status=status.HTTP_200_OK
         )
 
-        response.set_cookie(
-            key="access_token",
-            value=access_token,
-            httponly=True,
-            secure=False,  # False locally
-            samesite="Lax",  # "None" for production, "Lax" for local testing
-            max_age=60 * 60,
-        )
-
-        response.set_cookie(
-            key="refresh_token",
-            value=refresh_token,
-            httponly=True,
-            secure=False,
-            samesite="Lax",
-            max_age=30 * 24 * 60 * 60,
-        )
+        set_auth_cookies(response, refresh)
 
         return response
 
@@ -197,22 +216,19 @@ class RefreshTokenView(APIView):
 
             refresh = RefreshToken(refresh_token)
 
-            access_token = str(
-                refresh.access_token
-            )
+            # Blocked users must not be able to mint new access tokens
+            user = User.objects.filter(id=refresh.get("user_id")).first()
+            if not user or not user.is_active:
+                return Response(
+                    {"detail": "Invalid refresh token"},
+                    status=401
+                )
 
             response = Response({
                 "success": True
             })
 
-            response.set_cookie(
-                key="access_token",
-                value=access_token,
-                httponly=True,
-                secure=False,  # False locally
-                samesite="Lax",
-                max_age=60 * 60,
-            )
+            set_access_cookie(response, str(refresh.access_token))
 
             return response
 
@@ -282,6 +298,7 @@ class VerifyPasswordResetOTPView(generics.GenericAPIView):
                 {
                     "success": True,
                     "message": "OTP verified successfully. You may now reset your password.",
+                    "reset_token": serializer.validated_data["reset_token"],
                 },
                 status=status.HTTP_200_OK,
             )
@@ -337,52 +354,59 @@ def google_login(request):
                 "message": "Email not found in Google data"
             }, status=400)
 
-    except ValueError as e:
+        if not idinfo.get("email_verified", False):
+            return Response({
+                "success": False,
+                "message": "Google email is not verified"
+            }, status=400)
+
+    except ValueError:
         return Response({
             "success": False,
             "message": "Invalid Google token",
-            "error": str(e)
         }, status=400)
-    except Exception as e:
-        traceback.print_exc()
+    except Exception:
+        logger.exception("Google token verification failed")
         return Response({
             "success": False,
             "message": "Token verification failed",
-            "error": str(e)
         }, status=400)
 
     try:
-        user = User.objects.get(email=email)
+        user = User.objects.get(email=email.lower().strip())
     except User.DoesNotExist:
         return Response({
             "success": False,
             "message": "Email not registered. Please register using password first."
         }, status=404)
 
-    try:
-        refresh = RefreshToken.for_user(user)
-        access_token = str(refresh.access_token)
-        refresh_token = str(refresh)
-    except Exception:
+    if not user.is_active:
         return Response({
             "success": False,
-            "message": "Failed to generate tokens"
-        }, status=500)
+            "message": "User account is disabled."
+        }, status=403)
 
-    return Response({
+    update_detected_timezone(user, request.data.get("timezone"))
+
+    refresh = RefreshToken.for_user(user)
+
+    user_data = {
+        "id": user.id,
+        "email": user.email,
+        "username": user.username,
+        "role": user.role,
+        "timezone": user.timezone,
+    }
+
+    # Same contract as LoginView: user at top level, tokens only in
+    # httpOnly cookies (the frontend authenticates via cookies).
+    response = Response({
         "success": True,
         "message": "Login successful.",
-        "data": {
-            "user": {
-                "id": user.id,
-                "email": user.email,
-                "username": user.username,
-                "role": user.role,
-            },
-            "access": access_token,
-            "refresh": refresh_token,
-        }
+        "user": user_data,
     })
+    set_auth_cookies(response, refresh)
+    return response
 
 
 class ClientProfileViewSet(viewsets.ModelViewSet):
@@ -508,6 +532,12 @@ def stripe_webhook(request):
     session = event["data"]["object"]
     metadata = session.get("metadata") or {}
 
+    # "completed" only means the checkout finished; delayed payment methods
+    # can complete unpaid. Only grant escrow/subscriptions for paid sessions.
+    if session.get("payment_status") != "paid":
+        logger.warning("Ignoring unpaid checkout session %s", session.get("id"))
+        return HttpResponse(status=200)
+
     payment_type = metadata.get("payment_type")
 
     # --------------------------------------------------
@@ -523,6 +553,7 @@ def stripe_webhook(request):
         StripeEscrowProcessor().process(
             offer_id=offer_id,
             payment_intent_id=payment_intent_id,
+            amount_total=session.get("amount_total"),
         )
         return HttpResponse(status=200)
 
@@ -541,6 +572,7 @@ def stripe_webhook(request):
             user_id=user_id,
             plan_id=plan_id,
             stripe_session_id=stripe_session_id,
+            amount_total=session.get("amount_total"),
         )
 
         return HttpResponse(status=200)
@@ -671,6 +703,7 @@ class FreelancerProfileDetailView(generics.RetrieveAPIView):
 
 
 class ClientStatisticsView(APIView):
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         user = request.user

@@ -28,8 +28,16 @@ ZEGO_SERVER_URL =  os.getenv('ZEGO_SERVER_URL')
 
 
 
+def env_bool(name, default=False):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+# Set DEBUG=True in the local .env for development.
+DEBUG = env_bool("DEBUG", False)
 
 ALLOWED_HOSTS = [
     "54.88.141.82",
@@ -44,19 +52,42 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "https://freelancer-frontend-blue.vercel.app",
-    "https://api.freelancerhub.online",
     "https://freelancerhub.online",
-    "https://www.freelancerhub.online", 
-
-    
+    "https://www.freelancerhub.online",
 ]
-FRONTEND_URL = "https://freelancerhub.online"
-# FRONTEND_URL = "http://localhost:3000"
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://freelancerhub.online")
 
 
-# allow credentials if you're using JWT or session auth
+# Credentials (auth cookies) are only accepted from the explicit origins above.
+# Never combine CORS_ALLOW_ALL_ORIGINS with credentials.
 CORS_ALLOW_CREDENTIALS = True
-CORS_ALLOW_ALL_ORIGINS = True
+
+# Auth cookie flags. Secure cookies are still accepted by browsers on
+# http://localhost, so the secure default works for local development too.
+AUTH_COOKIE_SECURE = env_bool("AUTH_COOKIE_SECURE", not DEBUG)
+AUTH_COOKIE_SAMESITE = os.getenv("AUTH_COOKIE_SAMESITE", "Lax")
+
+# Django admin session / CSRF cookies follow the same rule
+SESSION_COOKIE_SECURE = AUTH_COOKIE_SECURE
+CSRF_COOKIE_SECURE = AUTH_COOKIE_SECURE
+
+# HTTPS hardening. Off by default because it depends on the proxy in front
+# of Django; enable per environment once TLS is confirmed end to end.
+#   USE_X_FORWARDED_PROTO=True  when a TLS-terminating proxy sets X-Forwarded-Proto
+#   SECURE_SSL_REDIRECT=True    redirect plain HTTP to HTTPS
+#   SECURE_HSTS_SECONDS=31536000
+if env_bool("USE_X_FORWARDED_PROTO", False):
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+SECURE_SSL_REDIRECT = env_bool("SECURE_SSL_REDIRECT", False)
+SECURE_HSTS_SECONDS = int(os.getenv("SECURE_HSTS_SECONDS", "0"))
+SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool("SECURE_HSTS_INCLUDE_SUBDOMAINS", False)
+
+# Real Stripe refunds for escrow. Off by default so deploying this code does
+# not start moving money; refunds are then recorded in the ledger only.
+STRIPE_REFUNDS_ENABLED = env_bool("STRIPE_REFUNDS_ENABLED", False)
+
+# Media is served by Django unless a reverse proxy / object store takes over.
+SERVE_MEDIA = env_bool("SERVE_MEDIA", True)
 
 
 # Application definition
@@ -140,7 +171,7 @@ DATABASES = {
 
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 
-SITE_URL = "http://localhost:8000"
+SITE_URL = os.getenv("SITE_URL", "http://localhost:8000")
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
@@ -167,6 +198,11 @@ REST_FRAMEWORK = {
         "apps.users.authentication.CookieJWTAuthentication",
     ),
 
+    # Secure by default: public endpoints must opt in with AllowAny.
+    "DEFAULT_PERMISSION_CLASSES": (
+        "rest_framework.permissions.IsAuthenticated",
+    ),
+
     "DEFAULT_FILTER_BACKENDS": (
         "django_filters.rest_framework.DjangoFilterBackend",
         "rest_framework.filters.SearchFilter",
@@ -184,17 +220,11 @@ REST_FRAMEWORK = {
         "zego_token": "10/min",
     },
 
-    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    "DEFAULT_PAGINATION_CLASS": "apps.cores.pagination.StandardPagination",
     "PAGE_SIZE": 20,
 
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
 }
-
-CORS_ALLOWED_ORIGINS = [
-    "https://freelancerhub.online",
-    "https://freelancer-frontend-blue.vercel.app",
-]
-
 
 
 SIMPLE_JWT = {

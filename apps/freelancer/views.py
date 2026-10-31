@@ -18,28 +18,47 @@ from .serializers import (
     FreelancerProfileSerializer, CategorySerializer,
     PortfolioProjectSerializer, SkillSerializer
 )
-from apps.users.serializers import ProjectSerializer
+from apps.users.serializers import PublicProjectSerializer
 from apps.users.models import Project
 
 logger = logging.getLogger(__name__)
+
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+ALLOWED_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "gif", "webp", "avif"}
+ALLOWED_RESUME_EXTENSIONS = {"pdf", "doc", "docx"}
 
 
 # ============================================================================
 # CATEGORY & SKILL VIEWSETS
 # ============================================================================
 
+class CanCreateButOnlyAdminModifies(permissions.BasePermission):
+    """
+    Anyone may read; signed-in users may add new entries (clients add skills
+    and categories while posting a project); only staff may update/delete,
+    because deleting a skill cascades into every freelancer's skill list.
+    """
+
+    def has_permission(self, request, view):
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        if request.method == "POST":
+            return bool(request.user and request.user.is_authenticated)
+        return bool(request.user and request.user.is_staff)
+
+
 class CategoryViewSet(viewsets.ModelViewSet):
     """Manage skill categories."""
     queryset = Category.objects.all()
     serializer_class = CategorySerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [CanCreateButOnlyAdminModifies]
 
 
 class SkillViewSet(viewsets.ModelViewSet):
     """Manage skills."""
     queryset = Skill.objects.all()
     serializer_class = SkillSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [CanCreateButOnlyAdminModifies]
 
 
 # ============================================================================
@@ -95,6 +114,9 @@ class FreelancerProfileViewSet(viewsets.ModelViewSet):
 
     def create(self, request, *args, **kwargs):
         """Create or update freelancer profile."""
+        if request.user.role != "freelancer":
+            raise PermissionDenied("Only freelancers can have profiles.")
+
         if FreelancerProfile.objects.filter(user=request.user).exists():
             return self.partial_update(request, *args, **kwargs)
 
@@ -145,10 +167,30 @@ class FreelancerProfileViewSet(viewsets.ModelViewSet):
         """Dedicated endpoint for file uploads."""
         profile = self.get_object()
 
-        if "profile_picture" in request.FILES:
-            profile.profile_picture = request.FILES["profile_picture"]
-        if "resume" in request.FILES:
-            profile.resume = request.FILES["resume"]
+        # Assigning files directly bypasses serializer validation, so check
+        # type/size here (blocks e.g. HTML uploaded as a "resume").
+        picture = request.FILES.get("profile_picture")
+        resume = request.FILES.get("resume")
+        errors = {}
+        if picture:
+            ext = picture.name.rsplit(".", 1)[-1].lower() if "." in picture.name else ""
+            if ext not in ALLOWED_IMAGE_EXTENSIONS:
+                errors["profile_picture"] = "Unsupported image type."
+            elif picture.size > MAX_UPLOAD_BYTES:
+                errors["profile_picture"] = "Image must be 5MB or smaller."
+        if resume:
+            ext = resume.name.rsplit(".", 1)[-1].lower() if "." in resume.name else ""
+            if ext not in ALLOWED_RESUME_EXTENSIONS:
+                errors["resume"] = "Resume must be a PDF, DOC or DOCX file."
+            elif resume.size > MAX_UPLOAD_BYTES:
+                errors["resume"] = "Resume must be 5MB or smaller."
+        if errors:
+            return Response(errors, status=status.HTTP_400_BAD_REQUEST)
+
+        if picture:
+            profile.profile_picture = picture
+        if resume:
+            profile.resume = resume
 
         profile.save()
         serializer = self.get_serializer(profile)
@@ -172,7 +214,9 @@ class PortfolioProjectViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         """Associate project with current user's freelancer profile."""
-        freelancer = FreelancerProfile.objects.get(user=self.request.user)
+        freelancer = FreelancerProfile.objects.filter(user=self.request.user).first()
+        if not freelancer:
+            raise PermissionDenied("Create your freelancer profile first.")
         serializer.save(freelancer=freelancer)
 
 
@@ -182,10 +226,15 @@ class PortfolioProjectViewSet(viewsets.ModelViewSet):
 
 class OpenProjectListView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]
-    serializer_class = ProjectSerializer
+    serializer_class = PublicProjectSerializer
 
     def get_queryset(self):
-        return Project.objects.filter(status="open").order_by("-created_at")
+        return (
+            Project.objects.filter(status="open")
+            .select_related("client")
+            .prefetch_related("skills_required")
+            .order_by("-created_at")
+        )
 
 
 class FreelancerEarningsView(generics.ListAPIView):
@@ -205,10 +254,12 @@ class FreelancerEarningsView(generics.ListAPIView):
 
 class RelatedProjectsView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]
-    serializer_class = ProjectSerializer
+    serializer_class = PublicProjectSerializer
 
     def get_queryset(self):
-        freelancer = self.request.user.freelancer_profile
+        freelancer = FreelancerProfile.objects.filter(user=self.request.user).first()
+        if not freelancer:
+            return Project.objects.none()
         skills = freelancer.skills.values_list("skill_id", flat=True)
 
         return (
