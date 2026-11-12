@@ -74,7 +74,9 @@ class ProjectScoringConfigSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({w_name: "Weight must be between 0 and 1."})
 
         total = skill + experience + budget + reliability
-        if abs(total - 1.0) > 0.01:
+        # Same tolerance as ProjectScoringConfig.clean(); a looser check here
+        # let the model raise an unhandled ValidationError (HTTP 500).
+        if abs(total - 1.0) > 1e-6:
             raise serializers.ValidationError("All weights must sum to 1.0 (100%).")
 
         return data

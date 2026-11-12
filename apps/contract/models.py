@@ -102,6 +102,7 @@ class Contract(models.Model):
         self.status = "disputed"
         self.save(update_fields=["status"]) 
     
+    @staticmethod
     def calculate_platform_fee(amount, percent):
         return (amount * percent / Decimal("100")).quantize(
             Decimal("0.01"), rounding=ROUND_HALF_UP
@@ -266,4 +267,5 @@ class ContractReview(models.Model):
 
     @property
     def freelancer(self):
-        return self.contract.offer.freelancer.freelancer_profile
+        # Offer.freelancer is already the FreelancerProfile
+        return self.contract.offer.freelancer

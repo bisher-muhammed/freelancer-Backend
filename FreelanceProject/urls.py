@@ -1,7 +1,7 @@
 from django.contrib import admin
-from django.urls import path,include
+from django.urls import path, include, re_path
 from django.conf import settings
-from django.conf.urls.static import static
+from apps.cores.media import protected_media
 from rest_framework_simplejwt.views import (
     TokenObtainPairView,
     TokenRefreshView,
@@ -36,6 +36,14 @@ urlpatterns = [
 ]
 
 
-if settings.DEBUG:
-    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+if settings.DEBUG or settings.SERVE_MEDIA:
+    # Uploads go through an access check (screenshots, contract documents and
+    # resumes are private). If a proxy serves /media/ directly instead, it
+    # bypasses this check — route /media/ to Django in that case.
+    urlpatterns += [
+        re_path(
+            r"^%s(?P<path>.*)$" % settings.MEDIA_URL.lstrip("/"),
+            protected_media,
+        ),
+    ]
 

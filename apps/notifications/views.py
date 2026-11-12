@@ -1,4 +1,5 @@
-from rest_framework.viewsets import ModelViewSet
+from rest_framework import mixins
+from rest_framework.viewsets import GenericViewSet
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -11,7 +12,14 @@ from .models import ActivityLog, Notification
 from .serializers import AdminActivitySerializer, ClientActivitySerializer, NotificationSerializer
 
 
-class NotificationViewSet(ModelViewSet):
+class NotificationViewSet(
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.DestroyModelMixin,
+    GenericViewSet,
+):
+    # Notifications are created by the system only; users can read,
+    # mark as read and delete their own.
     serializer_class = NotificationSerializer
     permission_classes = [IsAuthenticated]
 

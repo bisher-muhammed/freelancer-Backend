@@ -1,9 +1,10 @@
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
+import stripe
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 from django.core.exceptions import ValidationError
-from rest_framework import request
 
 from apps.applications.models import EscrowPayment
 from apps.contract.models import Contract
@@ -119,10 +120,8 @@ class EscrowRefundProcessor:
                 f"(current status: '{contract.status}')."
             )
 
-        if contract.end_reason != "terminated":
-            raise ValidationError(
-                "Refund flow is only for terminated contracts."
-            )
+        # Both terminated and normally completed contracts can leave unused
+        # escrow behind; it is refundable either way.
 
         if escrow.status == "refunded":
             raise ValidationError(
@@ -161,12 +160,20 @@ class EscrowRefundProcessor:
 
         try:
 
-            # stripe.Refund.create(
-            #     payment_intent=escrow.stripe_payment_intent_id,
-            #     amount=int(refund_amount * 100),
-            # )
-
-            pass
+            # Real refunds only when explicitly enabled for the environment
+            # (STRIPE_REFUNDS_ENABLED); otherwise the refund is ledger-only.
+            if settings.STRIPE_REFUNDS_ENABLED:
+                if not escrow.stripe_payment_intent_id:
+                    raise ValueError("Escrow has no Stripe payment intent.")
+                stripe.api_key = settings.STRIPE_SECRET_KEY
+                stripe.Refund.create(
+                    payment_intent=escrow.stripe_payment_intent_id,
+                    amount=int(
+                        (refund_amount * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+                    ),
+                    # Same key on retry -> Stripe will not refund twice
+                    idempotency_key=f"escrow-refund-{escrow.id}",
+                )
 
         except Exception as e:
 

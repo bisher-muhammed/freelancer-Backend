@@ -1,15 +1,18 @@
+import logging
+
 from rest_framework import serializers
 from django.core.exceptions import ValidationError
+from django.db import transaction
 from django.utils import timezone
-from apps.applications.tasks import send_offer_created_email
-from apps.applications.tasks import send_offer_created_email
 from apps.contract.serializers import EscrowPaymentSerializer
 from apps.notifications.services.create_notifications import notify_user
 from apps. users.models import Project, ClientProfile, User
 from apps. freelancer.models import Skill
-from apps.users.serializers import ProjectSerializer
+from apps.users.serializers import PublicProjectSerializer
 from .models import Proposal,ProposalScore,Message,ChatRoom,SavedProject,Meeting,Offer
 from django.db.models import Q
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------- Client Info ----------------
@@ -132,10 +135,22 @@ class ProposalCreateSerializer(serializers.ModelSerializer):
         user = request.user
         project = attrs['project']
 
+        if user.role != "freelancer":
+            raise serializers.ValidationError(
+                "Only freelancers can submit proposals."
+            )
+
         if project.client == user:
             raise serializers.ValidationError(
                 "You cannot apply to your own project."
             )
+
+        for field in ("bid_fixed_price", "bid_hourly_rate"):
+            value = attrs.get(field)
+            if value is not None and value <= 0:
+                raise serializers.ValidationError(
+                    {field: "Bid must be greater than zero."}
+                )
 
         if Proposal.objects.filter(
             project=project,
@@ -382,7 +397,7 @@ class ToggleSaveProjectSerializer(serializers.Serializer):
     
 
 class SavedProjectListSerializer(serializers.ModelSerializer):
-    project = ProjectSerializer()
+    project = PublicProjectSerializer()
     saved_at = serializers.DateTimeField()
     
     class Meta:
@@ -395,10 +410,11 @@ class SavedProjectListSerializer(serializers.ModelSerializer):
 
 
 class MeetingSerializer(serializers.ModelSerializer):
+    proposal_status = serializers.CharField(source="proposal.status", read_only=True)
+
     class Meta:
         model = Meeting
         fields = "__all__"
-        proposal_status = serializers.CharField(source="proposal.status", read_only=True)
         read_only_fields = [
             "zego_room_id",
             "created_by",
@@ -406,9 +422,11 @@ class MeetingSerializer(serializers.ModelSerializer):
             "actual_started_at",
             "actual_ended_at",
             "created_at",
-            proposal_status,
+            "last_token_issued_at",
         ]
-        
+
+    # Fields that bind a meeting to its participants; never re-pointable.
+    IMMUTABLE_ON_UPDATE = ("proposal", "chat_room", "meeting_type")
 
     def validate(self, attrs):
         request = self.context["request"]
@@ -419,6 +437,17 @@ class MeetingSerializer(serializers.ModelSerializer):
             if self.instance.status == "completed":
                 raise serializers.ValidationError(
                     "Completed meetings cannot be modified."
+                )
+            for field in self.IMMUTABLE_ON_UPDATE:
+                if field in attrs and attrs[field] != getattr(self.instance, field):
+                    raise serializers.ValidationError(
+                        {field: "This field cannot be changed after scheduling."}
+                    )
+            start_time = attrs.get("start_time", self.instance.start_time)
+            end_time = attrs.get("end_time", self.instance.end_time)
+            if end_time <= start_time:
+                raise serializers.ValidationError(
+                    {"end_time": "End time must be after start time."}
                 )
             return attrs
 
@@ -527,13 +556,8 @@ class MeetingPublicSerializer(serializers.ModelSerializer):
         ]
 
     def get_can_join(self, obj):
-        now = timezone.now()
-
-        if obj.status not in ("scheduled", "ongoing"):
-            return False
-
-        # Optional: allow joining only 10 mins before
-        return obj.start_time - timezone.timedelta(minutes=10) <= now <= obj.end_time
+        # Same window the token endpoint enforces (incl. the late buffer)
+        return obj.is_joinable_now()
 
     def get_is_upcoming(self, obj):
         return obj.start_time > timezone.now()
@@ -565,6 +589,15 @@ class ProposalDetailSerializer(serializers.ModelSerializer):
             context=self.context
         ).data
 
+
+
+def _queue_offer_email(offer_id):
+    # Best effort: the offer exists either way, and the task itself retries
+    from apps.applications.tasks import send_offer_created_email
+    try:
+        send_offer_created_email.delay(offer_id)
+    except Exception:
+        logger.exception("Could not queue offer email for offer %s", offer_id)
 
 
 class OfferCreateSerializer(serializers.ModelSerializer):
@@ -647,7 +680,9 @@ class OfferCreateSerializer(serializers.ModelSerializer):
 
         project = proposal.project
 
-        
+        offer_id = offer.id
+        transaction.on_commit(lambda: _queue_offer_email(offer_id))
+
         notify_user(
             recipient=proposal.freelancer,   # User instance
             notif_type="OFFER_SENT",

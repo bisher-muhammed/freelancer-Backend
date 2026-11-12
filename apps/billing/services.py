@@ -1,14 +1,10 @@
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 from django.db import transaction
+from django.db.models import Sum
 from django.utils import timezone
 from django.core.exceptions import ValidationError
 from apps.tracking.models import WorkSession
 from .models import BillingUnit, Invoice, PayoutBatch
-
-from decimal import Decimal, ROUND_HALF_UP
-from django.core.exceptions import ValidationError
-from apps.tracking.models import WorkSession
-from .models import BillingUnit
 
 def create_billing_unit_for_session(session: WorkSession):
     contract = session.contract
@@ -39,19 +35,32 @@ def create_billing_unit_for_session(session: WorkSession):
         rounding=ROUND_HALF_UP,
     )
 
-    # --- New Budget Validation ---
-    remaining_budget = offer.remaining_budget
+    # --- Budget Validation ---
+    # Pending (not yet reviewed) units also claim escrow. Counting only
+    # approved/locked/paid units (offer.remaining_budget) let several pending
+    # sessions each be capped against the same remaining amount, so total
+    # billing could exceed the escrow.
+    committed = (
+        BillingUnit.objects.filter(
+            contract=contract,
+            status__in=["pending", "approved", "locked", "paid"],
+        ).aggregate(total=Sum("gross_amount"))["total"]
+        or Decimal("0.00")
+    )
+    remaining_budget = max(Decimal("0.00"), offer.total_budget - committed)
     if remaining_budget <= 0:
         raise ValidationError("Cannot bill session: offer budget exhausted.")
 
     # Cap the gross_amount to remaining budget
     if gross_amount > remaining_budget:
         gross_amount = remaining_budget
-        # Recalculate billable_seconds based on remaining budget
-        billable_hours = (gross_amount / hourly_rate).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
+        # Seconds actually covered by the capped amount (rounded down so the
+        # recorded time never exceeds what was paid for)
+        billable_seconds = int(
+            (gross_amount / hourly_rate * Decimal("3600")).to_integral_value(
+                rounding=ROUND_DOWN
+            )
         )
-        billable_seconds = int(billable_hours * 3600)
 
     return BillingUnit.objects.create(
         contract=contract,
